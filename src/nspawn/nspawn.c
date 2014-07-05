@@ -2820,6 +2820,7 @@ static void partition_free(Partition *p) {
 static int dissect_image(
                 int fd,
                 Partition **root_device,
+                Partition **usr_device,
                 Partition **home_device,
                 Partition **srv_device,
                 bool *secondary) {
@@ -2831,6 +2832,12 @@ static int dissect_image(
 #endif
 #ifdef GPT_ROOT_SECONDARY
         _cleanup_partition_free_ Partition *secondary_root = NULL;
+#endif
+#ifdef GPT_USR_NATIVE
+        _cleanup_partition_free_ Partition *usr = NULL;
+#endif
+#ifdef GPT_USR_SECONDARY
+        _cleanup_partition_free_ Partition *secondary_usr = NULL;
 #endif
         _cleanup_udev_enumerate_unref_ struct udev_enumerate *e = NULL;
         _cleanup_udev_device_unref_ struct udev_device *d = NULL;
@@ -2846,6 +2853,7 @@ static int dissect_image(
 
         assert(fd >= 0);
         assert(root_device);
+        assert(usr_device);
         assert(home_device);
         assert(srv_device);
         assert(secondary);
@@ -3085,6 +3093,30 @@ static int dissect_image(
                                         return log_oom();
                         }
 #endif
+#ifdef GPT_USR_NATIVE
+                        else if (sd_id128_equal(type_id, GPT_USR_NATIVE)) {
+
+                                if (usr && nr >= usr->index)
+                                        continue;
+
+                                partition_free(usr);
+                                usr = partition_new(node, nr, flags);
+                                if (!usr)
+                                        return log_oom();
+                        }
+#endif
+#ifdef GPT_USR_SECONDARY
+                        else if (sd_id128_equal(type_id, GPT_USR_SECONDARY)) {
+
+                                if (secondary_usr && nr >= secondary_usr->index)
+                                        continue;
+
+                                partition_free(secondary_usr);
+                                secondary_usr = partition_new(node, nr, flags);
+                                if (!secondary_usr)
+                                        return log_oom();
+                        }
+#endif
                         else if (sd_id128_equal(type_id, GPT_LINUX_GENERIC)) {
 
                                 if (generic)
@@ -3150,6 +3182,14 @@ static int dissect_image(
                           "    %s\n"
                           PARTITION_TABLE_BLURB, arg_image);
                 return -EINVAL;
+        }
+
+        if (usr && !*secondary) {
+                *usr_device = usr;
+                usr = NULL;
+        } else if (secondary_usr && *secondary) {
+                *usr_device = secondary_usr;
+                secondary_usr = NULL;
         }
 
         if (home) {
@@ -3237,6 +3277,7 @@ static int mount_device(const Partition *what, const char *where, const char *di
 static int mount_devices(
                 const char *where,
                 const Partition *root_device,
+                const Partition *usr_device,
                 const Partition *home_device,
                 const Partition *srv_device) {
         int r;
@@ -3247,6 +3288,14 @@ static int mount_devices(
                 r = mount_device(root_device, arg_directory, NULL);
                 if (r < 0)
                         return log_error_errno(r, "Failed to mount root directory: %m");
+        }
+
+        if (usr_device) {
+                r = mount_device(usr_device, arg_directory, "/usr");
+                if (r < 0) {
+                        log_error("Failed to mount usr directory: %s", strerror(-r));
+                        return r;
+                }
         }
 
         if (home_device) {
@@ -3719,7 +3768,7 @@ static int determine_uid_shift(void) {
 int main(int argc, char *argv[]) {
 
         _cleanup_free_ char *device_path = NULL, *console = NULL;
-        _cleanup_partition_free_ Partition *root_device = NULL,
+        _cleanup_partition_free_ Partition *root_device = NULL, *usr_device = NULL,
                                  *home_device = NULL, *srv_device = NULL;
         _cleanup_close_ int master = -1, image_fd = -1;
         _cleanup_fdset_free_ FDSet *fds = NULL;
@@ -3892,6 +3941,7 @@ int main(int argc, char *argv[]) {
 
                 r = dissect_image(image_fd,
                                   &root_device,
+                                  &usr_device,
                                   &home_device,
                                   &srv_device,
                                   &secondary);
@@ -4066,6 +4116,7 @@ int main(int argc, char *argv[]) {
 
                         if (mount_devices(arg_directory,
                                           root_device,
+                                          usr_device,
                                           home_device,
                                           srv_device) < 0)
                                 _exit(EXIT_FAILURE);

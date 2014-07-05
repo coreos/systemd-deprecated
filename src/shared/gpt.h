@@ -34,6 +34,11 @@
 #define GPT_ROOT_ARM    SD_ID128_MAKE(69,da,d7,10,2c,e4,4e,3c,b1,6c,21,a1,d4,9a,be,d3)
 #define GPT_ROOT_ARM_64 SD_ID128_MAKE(b9,21,b0,45,1d,f0,41,c3,af,44,4c,6f,28,0d,3f,ae)
 
+#define GPT_USR_X86     SD_ID128_MAKE(ef,ec,21,e4,2f,c7,4b,01,83,93,32,9f,a4,05,a5,2d)
+#define GPT_USR_X86_64  SD_ID128_MAKE(5d,fb,f5,f4,28,48,4b,ac,aa,5e,0d,9a,20,b7,45,a6)
+#define GPT_USR_ARM     SD_ID128_MAKE(7c,b2,1d,01,6b,ed,40,cc,8d,ea,d8,a6,2f,69,18,62)
+#define GPT_USR_ARM_64  SD_ID128_MAKE(fb,b1,aa,b9,b9,76,45,11,b2,c4,d4,15,2f,82,13,b9)
+
 #define GPT_ESP         SD_ID128_MAKE(c1,2a,73,28,f8,1f,11,d2,ba,4b,00,a0,c9,3e,c9,3b)
 #define GPT_SWAP        SD_ID128_MAKE(06,57,fd,6d,a4,ab,43,c4,84,e5,09,33,c8,4b,4f,4f)
 #define GPT_HOME        SD_ID128_MAKE(93,3a,c7,e1,2e,b4,4f,13,b8,44,0e,14,e2,ae,f9,15)
@@ -42,15 +47,21 @@
 #if defined(__x86_64__)
 #  define GPT_ROOT_NATIVE GPT_ROOT_X86_64
 #  define GPT_ROOT_SECONDARY GPT_ROOT_X86
+#  define GPT_USR_NATIVE GPT_USR_X86_64
+#  define GPT_USR_SECONDARY GPT_USR_X86
 #elif defined(__i386__)
 #  define GPT_ROOT_NATIVE GPT_ROOT_X86
+#  define GPT_USR_NATIVE GPT_USR_X86
 #endif
 
 #if defined(__aarch64__) && (__BYTE_ORDER != __BIG_ENDIAN)
 #  define GPT_ROOT_NATIVE GPT_ROOT_ARM_64
 #  define GPT_ROOT_SECONDARY GPT_ROOT_ARM
+#  define GPT_USR_NATIVE GPT_USR_ARM_64
+#  define GPT_USR_SECONDARY GPT_USR_ARM
 #elif defined(__arm__) && (__BYTE_ORDER != __BIG_ENDIAN)
 #  define GPT_ROOT_NATIVE GPT_ROOT_ARM
+#  define GPT_USR_NATIVE GPT_USR_ARM
 #endif
 
 /* Flags we recognize on the root, swap, home and srv partitions when

@@ -109,6 +109,8 @@ static int network_load_one(Manager *manager, const char *filename) {
 
         network->link_local = ADDRESS_FAMILY_IPV6;
 
+        network->ip_forward = ADDRESS_FAMILY_UNSET;
+
         r = config_parse(NULL, filename, file,
                          "Match\0"
                          "Link\0"

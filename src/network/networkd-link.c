@@ -1657,13 +1657,15 @@ static int link_configure(Link *link) {
         if (r < 0)
                 return r;
 
-        r = link_set_ipv4_forward(link);
-        if (r < 0)
-                return r;
+        if (link->network->ip_forward != ADDRESS_FAMILY_UNSET) {
+                r = link_set_ipv4_forward(link);
+                if (r < 0)
+                        return r;
 
-        r = link_set_ipv6_forward(link);
-        if (r < 0)
-                return r;
+                r = link_set_ipv6_forward(link);
+                if (r < 0)
+                        return r;
+        }
 
         if (link_ipv4ll_enabled(link)) {
                 r = ipv4ll_configure(link);

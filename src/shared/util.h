@@ -87,6 +87,9 @@
 #include "missing.h"
 #include "time-util.h"
 
+/* Maximum length of a domain name. See RFC 1035 */
+#define DOMAIN_NAME_MAX 255
+
 /* What is interpreted as whitespace? */
 #define WHITESPACE " \t\n\r"
 #define NEWLINE    "\n\r"
@@ -552,6 +555,7 @@ bool nulstr_contains(const char*nulstr, const char *needle);
 bool plymouth_running(void);
 
 bool hostname_is_valid(const char *s) _pure_;
+bool domainname_is_valid(const char *s) _pure_;
 char* hostname_cleanup(char *s, bool lowercase);
 
 bool machine_name_is_valid(const char *s) _pure_;

@@ -22,7 +22,6 @@
 ***/
 
 #include <stdbool.h>
-#include <inttypes.h>
 #include <stdio.h>
 
 #include "sd-bus.h"
@@ -31,7 +30,6 @@
 #include "cgroup-util.h"
 #include "hashmap.h"
 #include "list.h"
-#include "set.h"
 #include "ratelimit.h"
 
 /* Enforce upper limit how many names we allow */
@@ -70,14 +68,11 @@ typedef enum StatusType {
         STATUS_TYPE_EMERGENCY,
 } StatusType;
 
-#include "unit.h"
 #include "job.h"
 #include "path-lookup.h"
 #include "execute.h"
 #include "unit-name.h"
-#include "exit-status.h"
 #include "show-status.h"
-#include "failure-action.h"
 
 struct Manager {
         /* Note that the set of units we know of is allowed to be
@@ -366,6 +361,8 @@ Set *manager_get_units_requiring_mounts_for(Manager *m, const char *path);
 const char *manager_get_runtime_prefix(Manager *m);
 
 ManagerState manager_state(Manager *m);
+
+void manager_update_failed_units(Manager *m, Unit *u, bool failed);
 
 const char *manager_state_to_string(ManagerState m) _const_;
 ManagerState manager_state_from_string(const char *s) _pure_;

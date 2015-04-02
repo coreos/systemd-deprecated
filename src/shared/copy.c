@@ -285,7 +285,7 @@ static int fd_copy_directory(
                 else if (S_ISBLK(buf.st_mode) || S_ISCHR(buf.st_mode))
                         q = fd_copy_node(dirfd(d), de->d_name, &buf, fdt, de->d_name);
                 else
-                        q = -ENOTSUP;
+                        q = -EOPNOTSUPP;
 
                 if (q == -EEXIST && merge)
                         q = 0;
@@ -317,7 +317,7 @@ int copy_tree_at(int fdf, const char *from, int fdt, const char *to, bool merge)
         else if (S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode))
                 return fd_copy_node(fdf, from, &st, fdt, to);
         else
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 }
 
 int copy_tree(const char *from, const char *to, bool merge) {
@@ -404,9 +404,15 @@ int copy_file_atomic(const char *from, const char *to, mode_t mode, bool replace
         if (r < 0)
                 return r;
 
-        if (renameat2(AT_FDCWD, t, AT_FDCWD, to, replace ? 0 : RENAME_NOREPLACE) < 0) {
-                unlink_noerrno(t);
-                return -errno;
+        if (replace) {
+                r = renameat(AT_FDCWD, t, AT_FDCWD, to);
+                if (r < 0)
+                        r = -errno;
+        } else
+                r = rename_noreplace(AT_FDCWD, t, AT_FDCWD, to);
+        if (r < 0) {
+                (void) unlink_noerrno(t);
+                return r;
         }
 
         return 0;

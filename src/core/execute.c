@@ -19,8 +19,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -29,14 +27,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/prctl.h>
-#include <linux/sched.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <grp.h>
-#include <pwd.h>
-#include <sys/mount.h>
-#include <linux/fs.h>
-#include <linux/oom.h>
 #include <poll.h>
 #include <glob.h>
 #include <sys/personality.h>
@@ -80,11 +72,13 @@
 #include "errno-list.h"
 #include "af-list.h"
 #include "mkdir.h"
-#include "apparmor-util.h"
 #include "smack-util.h"
 #include "bus-endpoint.h"
-#include "label.h"
 #include "cap-list.h"
+
+#ifdef HAVE_APPARMOR
+#include "apparmor-util.h"
+#endif
 
 #ifdef HAVE_SECCOMP
 #include "seccomp-util.h"
@@ -1165,10 +1159,10 @@ static void do_idle_pipe_dance(int idle_pipe[4]) {
 
                 if (idle_pipe[3] >= 0 && r == 0 /* timeout */) {
                         /* Signal systemd that we are bored and want to continue. */
-                        write(idle_pipe[3], "x", 1);
-
-                        /* Wait for systemd to react to the signal above. */
-                        fd_wait_for_event(idle_pipe[0], POLLHUP, IDLE_TIMEOUT2_USEC);
+                        r = write(idle_pipe[3], "x", 1);
+                        if (r > 0)
+                                /* Wait for systemd to react to the signal above. */
+                                fd_wait_for_event(idle_pipe[0], POLLHUP, IDLE_TIMEOUT2_USEC);
                 }
 
                 safe_close(idle_pipe[0]);

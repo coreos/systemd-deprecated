@@ -10,12 +10,12 @@ Description=File System Check on %f
 Documentation=man:systemd-fsck@.service(8)
 DefaultDependencies=no
 BindsTo=%i.device
-After=%i.device systemd-fsck-root.service local-fs-pre.target
+Wants=systemd-fsckd.socket
+After=%i.device systemd-fsck-root.service local-fs-pre.target systemd-fsckd.socket
 Before=shutdown.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=@rootlibexecdir@/systemd-fsck %f
-StandardOutput=journal+console
 TimeoutSec=0

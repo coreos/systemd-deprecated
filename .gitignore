@@ -45,6 +45,9 @@
 /machinectl
 /mtd_probe
 /networkctl
+/linuxx64.efi.stub
+/systemd-bootx64.efi
+/test-efi-disk.img
 /scsi_id
 /systemadm
 /systemctl
@@ -72,8 +75,10 @@
 /systemd-efi-boot-generator
 /systemd-escape
 /systemd-evcat
+/systemd-export
 /systemd-firstboot
 /systemd-fsck
+/systemd-fsckd
 /systemd-fstab-generator
 /systemd-getty-generator
 /systemd-gnome-ask-password-agent

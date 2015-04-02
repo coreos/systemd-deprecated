@@ -20,19 +20,16 @@
 ***/
 
 #include <endian.h>
-#include <assert.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <netdb.h>
 #include <poll.h>
-#include <byteswap.h>
 #include <sys/mman.h>
 #include <pthread.h>
 
 #include "util.h"
 #include "macro.h"
 #include "strv.h"
-#include "set.h"
 #include "missing.h"
 #include "def.h"
 #include "cgroup-util.h"
@@ -45,8 +42,6 @@
 #include "bus-socket.h"
 #include "bus-kernel.h"
 #include "bus-control.h"
-#include "bus-introspect.h"
-#include "bus-signature.h"
 #include "bus-objects.h"
 #include "bus-util.h"
 #include "bus-container.h"
@@ -355,6 +350,21 @@ _public_ int sd_bus_set_description(sd_bus *bus, const char *description) {
         assert_return(!bus_pid_changed(bus), -ECHILD);
 
         return free_and_strdup(&bus->description, description);
+}
+
+_public_ int sd_bus_set_allow_interactive_authorization(sd_bus *bus, int b) {
+        assert_return(bus, -EINVAL);
+        assert_return(!bus_pid_changed(bus), -ECHILD);
+
+        bus->allow_interactive_authorization = !!b;
+        return 0;
+}
+
+_public_ int sd_bus_get_allow_interactive_authorization(sd_bus *bus) {
+        assert_return(bus, -EINVAL);
+        assert_return(!bus_pid_changed(bus), -ECHILD);
+
+        return bus->allow_interactive_authorization;
 }
 
 static int hello_callback(sd_bus *bus, sd_bus_message *reply, void *userdata, sd_bus_error *error) {
@@ -1513,15 +1523,27 @@ static int bus_seal_message(sd_bus *b, sd_bus_message *m, usec_t timeout) {
 }
 
 static int bus_remarshal_message(sd_bus *b, sd_bus_message **m) {
+        bool remarshal = false;
+
         assert(b);
 
-        /* Do packet version and endianness already match? */
-        if ((b->message_version == 0 || b->message_version == (*m)->header->version) &&
-            (b->message_endian == 0 || b->message_endian == (*m)->header->endian))
-                return 0;
+        /* wrong packet version */
+        if (b->message_version != 0 && b->message_version != (*m)->header->version)
+                remarshal = true;
 
-        /* No? Then remarshal! */
-        return bus_message_remarshal(b, m);
+        /* wrong packet endianness */
+        if (b->message_endian != 0 && b->message_endian != (*m)->header->endian)
+                remarshal = true;
+
+        /* TODO: kdbus-messages received from the kernel contain data which is
+         * not allowed to be passed to KDBUS_CMD_SEND. Therefore, we have to
+         * force remarshaling of the message. Technically, we could just
+         * recreate the kdbus message, but that is non-trivial as other parts of
+         * the message refer to m->kdbus already. This should be fixed! */
+        if ((*m)->kdbus && (*m)->release_kdbus)
+                remarshal = true;
+
+        return remarshal ? bus_message_remarshal(b, m) : 0;
 }
 
 int bus_seal_synthetic_message(sd_bus *b, sd_bus_message *m) {
@@ -1684,7 +1706,7 @@ static int bus_send_internal(sd_bus *bus, sd_bus_message *_m, uint64_t *cookie, 
                 if (r < 0)
                         return r;
                 if (r == 0)
-                        return -ENOTSUP;
+                        return -EOPNOTSUPP;
         }
 
         /* If the cookie number isn't kept, then we know that no reply
@@ -3376,7 +3398,7 @@ _public_ int sd_bus_try_close(sd_bus *bus) {
         assert_return(!bus_pid_changed(bus), -ECHILD);
 
         if (!bus->is_kernel)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         if (!BUS_IS_OPEN(bus->state))
                 return -ENOTCONN;

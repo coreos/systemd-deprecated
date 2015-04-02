@@ -132,7 +132,7 @@ int bus_event_loop_with_idle(
                         /* Fallback for dbus1 connections: we
                          * unregister the name and wait for the
                          * response to come through for it */
-                        if (r == -ENOTSUP) {
+                        if (r == -EOPNOTSUPP) {
 
                                 /* Inform the service manager that we
                                  * are going down, so that it will
@@ -190,11 +190,33 @@ int bus_name_has_owner(sd_bus *c, const char *name, sd_bus_error *error) {
         return has_owner;
 }
 
+static int check_good_user(sd_bus_message *m, uid_t good_user) {
+        _cleanup_bus_creds_unref_ sd_bus_creds *creds = NULL;
+        uid_t sender_uid;
+        int r;
+
+        assert(m);
+
+        if (good_user == UID_INVALID)
+                return 0;
+
+        r = sd_bus_query_sender_creds(m, SD_BUS_CREDS_EUID, &creds);
+        if (r < 0)
+                return r;
+
+        r = sd_bus_creds_get_euid(creds, &sender_uid);
+        if (r < 0)
+                return r;
+
+        return sender_uid == good_user;
+}
+
 int bus_verify_polkit(
                 sd_bus_message *call,
                 int capability,
                 const char *action,
                 bool interactive,
+                uid_t good_user,
                 bool *_challenge,
                 sd_bus_error *e) {
 
@@ -202,6 +224,10 @@ int bus_verify_polkit(
 
         assert(call);
         assert(action);
+
+        r = check_good_user(call, good_user);
+        if (r != 0)
+                return r;
 
         r = sd_bus_query_sender_privilege(call, capability);
         if (r < 0)
@@ -330,6 +356,7 @@ int bus_verify_polkit_async(
                 int capability,
                 const char *action,
                 bool interactive,
+                uid_t good_user,
                 Hashmap **registry,
                 sd_bus_error *error) {
 
@@ -346,6 +373,10 @@ int bus_verify_polkit_async(
         assert(call);
         assert(action);
         assert(registry);
+
+        r = check_good_user(call, good_user);
+        if (r != 0)
+                return r;
 
 #ifdef ENABLE_POLKIT
         q = hashmap_get(*registry, call);
@@ -1139,7 +1170,7 @@ int bus_open_transport(BusTransport transport, const char *host, bool user, sd_b
         assert(bus);
 
         assert_return((transport == BUS_TRANSPORT_LOCAL) == !host, -EINVAL);
-        assert_return(transport == BUS_TRANSPORT_LOCAL || !user, -ENOTSUP);
+        assert_return(transport == BUS_TRANSPORT_LOCAL || !user, -EOPNOTSUPP);
 
         switch (transport) {
 
@@ -1174,7 +1205,7 @@ int bus_open_transport_systemd(BusTransport transport, const char *host, bool us
         assert(bus);
 
         assert_return((transport == BUS_TRANSPORT_LOCAL) == !host, -EINVAL);
-        assert_return(transport == BUS_TRANSPORT_LOCAL || !user, -ENOTSUP);
+        assert_return(transport == BUS_TRANSPORT_LOCAL || !user, -EOPNOTSUPP);
 
         switch (transport) {
 
@@ -1733,7 +1764,7 @@ static int check_wait_response(BusWaitForJobs *d, bool quiet) {
         else if (streq(d->result, "assert"))
                 r = -EPROTO;
         else if (streq(d->result, "unsupported"))
-                r = -ENOTSUP;
+                r = -EOPNOTSUPP;
         else if (!streq(d->result, "done") && !streq(d->result, "skipped"))
                 r = -EIO;
 
@@ -1759,7 +1790,6 @@ int bus_wait_for_jobs(BusWaitForJobs *d, bool quiet) {
                         if (q < 0 && r == 0)
                                 r = q;
 
-                        errno = 0;
                         log_debug_errno(q, "Got result %s/%m for job %s", strna(d->result), strna(d->name));
                 }
 

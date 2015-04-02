@@ -66,6 +66,7 @@ MANPAGES += \
 	man/systemd-efi-boot-generator.8 \
 	man/systemd-escape.1 \
 	man/systemd-fsck@.service.8 \
+	man/systemd-fsckd.service.8 \
 	man/systemd-fstab-generator.8 \
 	man/systemd-getty-generator.8 \
 	man/systemd-gpt-auto-generator.8 \
@@ -209,6 +210,8 @@ MANPAGES_ALIAS += \
 	man/systemd-ask-password-wall.service.8 \
 	man/systemd-fsck-root.service.8 \
 	man/systemd-fsck.8 \
+	man/systemd-fsckd.8 \
+	man/systemd-fsckd.socket.8 \
 	man/systemd-hibernate-resume.8 \
 	man/systemd-hibernate.service.8 \
 	man/systemd-hybrid-sleep.service.8 \
@@ -321,6 +324,8 @@ man/systemd-ask-password-wall.path.8: man/systemd-ask-password-console.service.8
 man/systemd-ask-password-wall.service.8: man/systemd-ask-password-console.service.8
 man/systemd-fsck-root.service.8: man/systemd-fsck@.service.8
 man/systemd-fsck.8: man/systemd-fsck@.service.8
+man/systemd-fsckd.8: man/systemd-fsckd.service.8
+man/systemd-fsckd.socket.8: man/systemd-fsckd.service.8
 man/systemd-hibernate-resume.8: man/systemd-hibernate-resume@.service.8
 man/systemd-hibernate.service.8: man/systemd-suspend.service.8
 man/systemd-hybrid-sleep.service.8: man/systemd-suspend.service.8
@@ -601,6 +606,12 @@ man/systemd-fsck-root.service.html: man/systemd-fsck@.service.html
 man/systemd-fsck.html: man/systemd-fsck@.service.html
 	$(html-alias)
 
+man/systemd-fsckd.html: man/systemd-fsckd.service.html
+	$(html-alias)
+
+man/systemd-fsckd.socket.html: man/systemd-fsckd.service.html
+	$(html-alias)
+
 man/systemd-hibernate-resume.html: man/systemd-hibernate-resume@.service.html
 	$(html-alias)
 
@@ -799,7 +810,9 @@ MANPAGES += \
 	man/sd_event_add_time.3 \
 	man/sd_event_get_fd.3 \
 	man/sd_event_new.3 \
+	man/sd_event_run.3 \
 	man/sd_event_set_name.3 \
+	man/sd_event_wait.3 \
 	man/systemd-bus-proxyd.8 \
 	man/systemd-bus-proxyd@.service.8
 MANPAGES_ALIAS += \
@@ -860,7 +873,10 @@ MANPAGES_ALIAS += \
 	man/sd_event_add_exit.3 \
 	man/sd_event_add_post.3 \
 	man/sd_event_default.3 \
+	man/sd_event_dispatch.3 \
 	man/sd_event_get_name.3 \
+	man/sd_event_loop.3 \
+	man/sd_event_prepare.3 \
 	man/sd_event_ref.3 \
 	man/sd_event_source_get_child_pid.3 \
 	man/sd_event_source_get_signal.3 \
@@ -928,7 +944,10 @@ man/sd_bus_unref.3: man/sd_bus_new.3
 man/sd_event_add_exit.3: man/sd_event_add_defer.3
 man/sd_event_add_post.3: man/sd_event_add_defer.3
 man/sd_event_default.3: man/sd_event_new.3
+man/sd_event_dispatch.3: man/sd_event_wait.3
 man/sd_event_get_name.3: man/sd_event_set_name.3
+man/sd_event_loop.3: man/sd_event_run.3
+man/sd_event_prepare.3: man/sd_event_wait.3
 man/sd_event_ref.3: man/sd_event_new.3
 man/sd_event_source_get_child_pid.3: man/sd_event_add_child.3
 man/sd_event_source_get_signal.3: man/sd_event_add_signal.3
@@ -1110,7 +1129,16 @@ man/sd_event_add_post.html: man/sd_event_add_defer.html
 man/sd_event_default.html: man/sd_event_new.html
 	$(html-alias)
 
+man/sd_event_dispatch.html: man/sd_event_wait.html
+	$(html-alias)
+
 man/sd_event_get_name.html: man/sd_event_set_name.html
+	$(html-alias)
+
+man/sd_event_loop.html: man/sd_event_run.html
+	$(html-alias)
+
+man/sd_event_prepare.html: man/sd_event_wait.html
 	$(html-alias)
 
 man/sd_event_ref.html: man/sd_event_new.html
@@ -1330,14 +1358,20 @@ endif
 
 if HAVE_MICROHTTPD
 MANPAGES += \
+	man/journal-remote.conf.5 \
 	man/systemd-journal-gatewayd.service.8 \
 	man/systemd-journal-remote.8 \
 	man/systemd-journal-upload.8
 MANPAGES_ALIAS += \
+	man/journal-remote.conf.d.5 \
 	man/systemd-journal-gatewayd.8 \
 	man/systemd-journal-gatewayd.socket.8
+man/journal-remote.conf.d.5: man/journal-remote.conf.5
 man/systemd-journal-gatewayd.8: man/systemd-journal-gatewayd.service.8
 man/systemd-journal-gatewayd.socket.8: man/systemd-journal-gatewayd.service.8
+man/journal-remote.conf.d.html: man/journal-remote.conf.html
+	$(html-alias)
+
 man/systemd-journal-gatewayd.html: man/systemd-journal-gatewayd.service.html
 	$(html-alias)
 
@@ -1634,6 +1668,7 @@ EXTRA_DIST += \
 	man/hostname.xml \
 	man/hostnamectl.xml \
 	man/hwdb.xml \
+	man/journal-remote.conf.xml \
 	man/journalctl.xml \
 	man/journald.conf.xml \
 	man/kernel-command-line.xml \
@@ -1682,7 +1717,9 @@ EXTRA_DIST += \
 	man/sd_event_add_time.xml \
 	man/sd_event_get_fd.xml \
 	man/sd_event_new.xml \
+	man/sd_event_run.xml \
 	man/sd_event_set_name.xml \
+	man/sd_event_wait.xml \
 	man/sd_get_seats.xml \
 	man/sd_id128_get_machine.xml \
 	man/sd_id128_randomize.xml \
@@ -1738,6 +1775,7 @@ EXTRA_DIST += \
 	man/systemd-escape.xml \
 	man/systemd-firstboot.xml \
 	man/systemd-fsck@.service.xml \
+	man/systemd-fsckd.service.xml \
 	man/systemd-fstab-generator.xml \
 	man/systemd-getty-generator.xml \
 	man/systemd-gpt-auto-generator.xml \

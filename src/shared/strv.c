@@ -19,7 +19,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
@@ -81,9 +80,10 @@ void strv_clear(char **l) {
         *l = NULL;
 }
 
-void strv_free(char **l) {
+char **strv_free(char **l) {
         strv_clear(l);
         free(l);
+        return NULL;
 }
 
 char **strv_copy(char * const *l) {

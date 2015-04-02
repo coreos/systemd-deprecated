@@ -23,10 +23,9 @@
 
 #include <stdbool.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <syslog.h>
 #include <sys/signalfd.h>
-#include <sys/types.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "macro.h"
@@ -156,12 +155,12 @@ void log_assert_failed_return(
                 const char *func);
 
 /* Logging with level */
-#define log_full_errno(level, error, ...)                                         \
-        ({                                                                        \
-                int _l = (level), _e = (error);                                   \
-                (log_get_max_level() >= LOG_PRI(_l))                              \
-                ? log_internal(_l, _e, __FILE__, __LINE__, __func__, __VA_ARGS__) \
-                : -abs(_e); \
+#define log_full_errno(level, error, ...)                               \
+        ({                                                              \
+                int _level = (level), _e = (error);                     \
+                (log_get_max_level() >= LOG_PRI(_level))                \
+                        ? log_internal(_level, _e, __FILE__, __LINE__, __func__, __VA_ARGS__) \
+                        : -abs(_e);                                     \
         })
 
 #define log_full(level, ...) log_full_errno(level, 0, __VA_ARGS__)

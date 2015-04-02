@@ -19,7 +19,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <stddef.h>
 #include <stdint.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
@@ -412,6 +411,7 @@ static const NLTypeSystem rtnl_neigh_type_system = {
 };
 
 static const NLType rtnl_types[RTM_MAX + 1] = {
+        [NLMSG_DONE]   = { .type = NLA_META, .size = 0 },
         [NLMSG_ERROR]  = { .type = NLA_META, .size = sizeof(struct nlmsgerr) },
         [RTM_NEWLINK]  = { .type = NLA_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
         [RTM_DELLINK]  = { .type = NLA_NESTED, .type_system = &rtnl_link_type_system, .size = sizeof(struct ifinfomsg) },
@@ -444,12 +444,12 @@ int type_system_get_type(const NLTypeSystem *type_system, const NLType **ret, ui
         assert(type_system->types);
 
         if (type > type_system->max)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         nl_type = &type_system->types[type];
 
         if (nl_type->type == NLA_UNSPEC)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         *ret = nl_type;
 
@@ -466,8 +466,7 @@ int type_system_get_type_system(const NLTypeSystem *type_system, const NLTypeSys
         if (r < 0)
                 return r;
 
-        assert_return(nl_type->type == NLA_NESTED, -EINVAL);
-
+        assert(nl_type->type == NLA_NESTED);
         assert(nl_type->type_system);
 
         *ret = nl_type->type_system;
@@ -485,8 +484,7 @@ int type_system_get_type_system_union(const NLTypeSystem *type_system, const NLT
         if (r < 0)
                 return r;
 
-        assert_return(nl_type->type == NLA_UNION, -EINVAL);
-
+        assert(nl_type->type == NLA_UNION);
         assert(nl_type->type_system_union);
 
         *ret = nl_type->type_system_union;
@@ -498,7 +496,7 @@ int type_system_union_get_type_system(const NLTypeSystemUnion *type_system_union
         int type;
 
         assert(type_system_union);
-        assert_return(type_system_union->match_type == NL_MATCH_SIBLING, -EINVAL);
+        assert(type_system_union->match_type == NL_MATCH_SIBLING);
         assert(type_system_union->lookup);
         assert(type_system_union->type_systems);
         assert(ret);
@@ -506,7 +504,7 @@ int type_system_union_get_type_system(const NLTypeSystemUnion *type_system_union
 
         type = type_system_union->lookup(key);
         if (type < 0)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         assert(type < type_system_union->num);
 
@@ -520,17 +518,15 @@ int type_system_union_protocol_get_type_system(const NLTypeSystemUnion *type_sys
 
         assert(type_system_union);
         assert(type_system_union->type_systems);
+        assert(type_system_union->match_type == NL_MATCH_PROTOCOL);
         assert(ret);
-        assert_return(type_system_union->match_type == NL_MATCH_PROTOCOL, -EINVAL);
-        assert_return(protocol < type_system_union->num, -EINVAL);
 
         if (protocol >= type_system_union->num)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         type_system = &type_system_union->type_systems[protocol];
-
-        if (!type_system)
-                return -ENOTSUP;
+        if (type_system->max == 0)
+                return -EOPNOTSUPP;
 
         *ret = type_system;
 

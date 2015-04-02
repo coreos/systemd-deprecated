@@ -32,16 +32,34 @@ External:
 * When lz4 gets an API for lz4 command output, make use of it to
   compress coredumps in a way compatible with /usr/bin/lz4.
 
+Before 220:
+
+* rework fsckd/fsck's connection logic or remove fsck entirely
+
+* fix userns support in nspawn, or remove it entirely
+
+* make unmount-on-eject work again
+
+* bus-proxy: GetConnectionSELinuxSecurityContext() is completely broken
+
 Features:
+
+* create a btrfs qgroup for /var/lib/machines, and add all container
+  subvolumes we create to it.
+
+* nspawn: add --overlay= to support overlay file systems, similar to
+  --tmpfs= and --bind=.
+
+* When logging about multiple units (stopping BoundTo units, conflicts, etc.),
+  log both units as UNIT=, so that journalctl -u triggers on both.
+
+* to allow "linking" of nspawn containers, extend --network-bridge= so
+  that it can dynamically create bridge interfaces that are refcounted
+  by the containers on them. For each group of containers to link together
 
 * journalctl --verify: don't show files that are currently being
   written to as FAIL, but instead show that their are being written
   to.
-
-* nspawn: allow configuring cgroup (and other) properties via
-  --property= when invoking from the command line.
-
-* add udev rule construct SYSCTL{} to write to sysctls
 
 * assign MESSAGE_ID to log messages about failed services
 
@@ -50,26 +68,9 @@ Features:
   infinity by default for all services. This then allows per-service
   control of coredumping.
 
-* introduce some call that iterates through cmsg and closes all fds
-  passed in, and use it everywhere...
-
 * generate better errors when people try to set transient properties
   that are not supported...
   http://lists.freedesktop.org/archives/systemd-devel/2015-February/028076.html
-
-* nspawn, if stdout/stderr/stdin are non-ttys, don't set up
-  /dev/console, but instead just pass the fds through directly.
-
-* When runlevel3.target is used to define dependencies on other units,
-  then we don't pick it up currently, since nothing ever references
-  runlevel3.target, and never figure out it actually is just an alias
-  for multi-user.target. A hackish fix could be to add a .wants link
-  from multi-user.target to runlevel3.target, if it is a symlink to
-  it. Best would be to create this .wants/ symlink from
-  sysv-generator. systemd would then load the referenced unit, figure
-  out it is just an alias and that the dependency would be on itself
-  and suppress it. Thus the alias and its deps would be loaded as
-  desired.
 
 * PID 1: when invoking systemctl preset-all on first boots, operate in
   an exclusively additive way, i.e. never remove any pre-existing
@@ -77,13 +78,6 @@ Features:
 
 * Introduce $LISTEN_NAMES to complement $LISTEN_FDS, containing a
   colon separated list of identifiers for the fds passed.
-
-* networkd: implement BindCarrier= logic to .network units that binds
-  application of the file to the carrier sense on another interface,
-  in order to implement uplink/downlink logic.
-
-* make networkd subscribe to PrepareForSleep(false) and refresh all
-  DHCP leases then.
 
 * when the fstab-generator runs in the initrd, it should create a /dev/null mask for systemd-fsck-root.service, to avoid that the the root fs is fsck'ed twice.
 
@@ -98,8 +92,6 @@ Features:
   be used to control SYSTEMD_READY=1/0 so that USB card readers aren't
   picked up by systemd unless they contain a medium. This would mirror
   the behaviour we already have for CD drives.
-
-* We should remove really old cruft from cdrom_id
 
 * nspawn: emulate /dev/kmsg using CUSE and turn off the syslog syscall
   with seccomp. That should provide us with a useful log buffer that
@@ -130,13 +122,9 @@ Features:
 
 * import-dkr: convert json bits to nspawn configuration
 
-* import: support import from local files, and export to local files
-
 * core/cgroup: support net_cls modules, and support automatically allocating class ids, then add support for making firewall changes depending on it, to implement a per-service firewall
 
 * introduce systemd-nspawn-ephemeral@.service, and hook it into "machinectl start" with a new --ephemeral switch
-
-* logind,machined: add generic catch-all polkit verbs for most privileged operations, similar to systemd itself
 
 * "machinectl status" should also show internal logs of the container in question
 
@@ -152,13 +140,7 @@ Features:
 
 * "machinectl commit" that takes a writable snapshot of a tree, invokes a shell in it, and marks it read-only after use
 
-* "machinectl status" should show 10 most recent log lines of both the host logs of the unit of the machine, plus the logs generated in the machine
-
-* add transparent btrfs pool in a loopback file in /var if btrfs operations (such as systemd-import pull-dkr) are used and /var is not a btrfs file system
-
 * systemd-nspawn -x should support ephemeral instances of gpt images
-
-* move machinectl's mount and copy commands into machined
 
 * hostnamectl: show root image uuid
 
@@ -189,16 +171,9 @@ Features:
 * as soon as we have kdbus, and sender timestamps, revisit coalescing multiple parallel daemon reloads:
   http://lists.freedesktop.org/archives/systemd-devel/2014-December/025862.html
 
-* set $REMOTE_IP (or $REMOTE_ADDR/$REMOTE_PORT) environment variable when doing per-connection socket activation. use format introduced by xinetd or CGI for this
-
 * the install state probably shouldn't get confused by generated units, think dbus1/kdbus compat!
 
 * in systemctl list-unit-files: show the install value the presets would suggest for a service in a third column
-
-* we should try harder to collapse start jobs for swaps that end up being the same:
-  http://lists.freedesktop.org/archives/systemd-devel/2014-November/025359.html
-
-* timedated should compensate on SetTime for the time spent in polkit
 
 * figure out when we can use the coarse timers
 
@@ -254,8 +229,6 @@ Features:
 * refcounting in sd-resolve is borked
 
 * exponential backoff in timesyncd and resolved when we cannot reach a server
-
-* tmpfiles: port to unquote_many_words(), similar to sysusers
 
 * unquote_many_words() should probably be used by a lot of code that
   currently uses FOREACH_WORD and friends. For example, most conf
@@ -381,7 +354,6 @@ Features:
     the hierarchies of child processes
 
 * transient units:
-  - allow creating auxiliary units with the same call
   - add field to transient units that indicate whether systemd or somebody else saves/restores its settings, for integration with libvirt
   - ensure scope units may be started only a single time
 
@@ -541,7 +513,6 @@ Features:
   - logind: when the power button is pressed short, just popup a
     logout dialog. If it is pressed for 1s, do the usual
     shutdown. Inspiration are Macs here.
-  - logind: allow users to kill or lock their own sessions
   - expose "Locked" property on logind sesison objects
   - given that logind now lets PID 1 do all nasty work, we can
     probably reduce the capability set it retains substantially.
@@ -731,7 +702,6 @@ Features:
   - kill scsi_id
   - add trigger --subsystem-match=usb/usb_device device
   - reimport udev db after MOVE events for devices without dev_t
-  - don't keep stale db in case event processing fails (also notify userspace about the failure)
 
 * when a service has the same env var set twice we actually store it twice and return that in systemctl show -p... We should only show the last setting
 

@@ -297,7 +297,22 @@
 
         <listitem><para>Make the container part of the specified
         slice, instead of the default
-        <filename>machine.slice</filename>.</para>
+        <filename>machine.slice</filename>. This is only applies if
+        the machine is run in its own scope unit, i.e. if
+        <option>--keep-unit</option> is not used.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>--property=</option></term>
+
+        <listitem><para>Set a unit property on the scope unit to
+        register for the machine. This only applies if the machine is
+        run in its own scope unit, i.e. if
+        <option>--keep-unit</option> is not used. Takes unit property
+        assignments in the same format as <command>systemctl
+        set-property</command>. This is useful to set memory limits
+        and similar for machines.</para>
         </listitem>
       </varlistentry>
 
@@ -456,6 +471,19 @@
       </varlistentry>
 
       <varlistentry>
+        <term><option>--kill-signal=</option></term>
+
+        <listitem><para>Specify the process signal to send to the
+        container's PID 1 when nspawn itself receives SIGTERM, in
+        order to trigger an orderly shutdown of the
+        container. Defaults to SIGRTMIN+3 if <option>--boot</option>
+        is used (on systemd-compatible init systems SIGRTMIN+3
+        triggers an orderly shutdown). Takes a signal name like
+        <literal>SIGHUP</literal>, <literal>SIGTERM</literal> or
+        similar as argument.</para></listitem>
+      </varlistentry>
+
+      <varlistentry>
         <term><option>--link-journal=</option></term>
 
         <listitem><para>Control whether the container's journal shall
@@ -598,7 +626,7 @@
 
         <listitem><para>Control the architecture ("personality")
         reported by
-        <citerefentry><refentrytitle>uname</refentrytitle><manvolnum>2</manvolnum></citerefentry>
+        <citerefentry project='man-pages'><refentrytitle>uname</refentrytitle><manvolnum>2</manvolnum></citerefentry>
         in the container. Currently, only <literal>x86</literal> and
         <literal>x86-64</literal> are supported. This is useful when
         running a 32-bit container on a 64-bit host. If this setting
@@ -735,7 +763,7 @@
       <citerefentry project='archlinux'><refentrytitle>pacman</refentrytitle><manvolnum>8</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>systemd.slice</refentrytitle><manvolnum>5</manvolnum></citerefentry>,
       <citerefentry><refentrytitle>machinectl</refentrytitle><manvolnum>1</manvolnum></citerefentry>,
-      <citerefentry><refentrytitle>btrfs</refentrytitle><manvolnum>8</manvolnum></citerefentry>
+      <citerefentry project='man-pages'><refentrytitle>btrfs</refentrytitle><manvolnum>8</manvolnum></citerefentry>
     </para>
   </refsect1>
 

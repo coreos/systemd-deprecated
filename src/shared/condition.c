@@ -23,14 +23,12 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/statvfs.h>
 #include <fnmatch.h>
 
 #include "sd-id128.h"
 #include "util.h"
 #include "virt.h"
 #include "path-util.h"
-#include "fileio.h"
 #include "architecture.h"
 #include "smack-util.h"
 #include "apparmor-util.h"
@@ -46,7 +44,7 @@ Condition* condition_new(ConditionType type, const char *parameter, bool trigger
 
         assert(type >= 0);
         assert(type < _CONDITION_TYPE_MAX);
-        assert(!parameter == (type == CONDITION_NULL));
+        assert((!parameter) == (type == CONDITION_NULL));
 
         c = new0(Condition, 1);
         if (!c)

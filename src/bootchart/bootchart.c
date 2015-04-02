@@ -33,10 +33,7 @@
 
  ***/
 
-#include <sys/time.h>
-#include <sys/types.h>
 #include <sys/resource.h>
-#include <sys/stat.h>
 #include <stdio.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -76,7 +73,7 @@ int sysfd=-1;
 #define DEFAULT_HZ 25.0
 #define DEFAULT_SCALE_X 100.0 /* 100px = 1sec */
 #define DEFAULT_SCALE_Y 20.0  /* 16px = 1 process bar */
-#define DEFAULT_INIT ROOTLIBDIR "/systemd/systemd"
+#define DEFAULT_INIT ROOTLIBEXECDIR "/systemd"
 #define DEFAULT_OUTPUT "/run/log"
 
 /* graph defaults */
@@ -271,10 +268,11 @@ static int parse_argv(int argc, char *argv[]) {
 
 static void do_journal_append(char *file) {
         struct iovec iovec[5];
-        int r, f, j = 0;
+        int r, j = 0;
         ssize_t n;
         _cleanup_free_ char *bootchart_file = NULL, *bootchart_message = NULL,
                 *p = NULL;
+        _cleanup_close_ int fd = -1;
 
         bootchart_file = strappend("BOOTCHART_FILE=", file);
         if (bootchart_file)
@@ -294,18 +292,17 @@ static void do_journal_append(char *file) {
 
         memcpy(p, "BOOTCHART=", 10);
 
-        f = open(file, O_RDONLY|O_CLOEXEC);
-        if (f < 0) {
-                log_error_errno(errno, "Failed to read bootchart data: %m");
+        fd = open(file, O_RDONLY|O_CLOEXEC);
+        if (fd < 0) {
+                log_error_errno(errno, "Failed to open bootchart data \"%s\": %m", file);
                 return;
         }
-        n = loop_read(f, p + 10, BOOTCHART_MAX, false);
+
+        n = loop_read(fd, p + 10, BOOTCHART_MAX, false);
         if (n < 0) {
                 log_error_errno(n, "Failed to read bootchart data: %m");
-                close(f);
                 return;
         }
-        close(f);
 
         iovec[j].iov_base = p;
         iovec[j].iov_len = 10 + n;

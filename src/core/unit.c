@@ -19,12 +19,8 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
 #include <errno.h>
 #include <string.h>
-#include <sys/epoll.h>
-#include <sys/timerfd.h>
-#include <poll.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -45,12 +41,10 @@
 #include "cgroup-util.h"
 #include "missing.h"
 #include "mkdir.h"
-#include "label.h"
 #include "fileio-label.h"
 #include "bus-common-errors.h"
 #include "dbus.h"
 #include "execute.h"
-#include "virt.h"
 #include "dropin.h"
 
 const UnitVTable * const unit_vtable[_UNIT_TYPE_MAX] = {
@@ -522,7 +516,7 @@ void unit_free(Unit *u) {
                 free(u->cgroup_path);
         }
 
-        set_remove(u->manager->failed_units, u);
+        manager_update_failed_units(u->manager, u, false);
         set_remove(u->manager->startup_units, u);
 
         free(u->description);
@@ -1462,7 +1456,7 @@ int unit_start(Unit *u) {
         }
 
         if (UNIT_VTABLE(u)->supported && !UNIT_VTABLE(u)->supported(u->manager))
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         /* If it is stopped, but we cannot start it, then fail */
         if (!UNIT_VTABLE(u)->start)
@@ -1648,12 +1642,14 @@ static void unit_check_binds_to(Unit *u) {
                         continue;
 
                 stop = true;
+                break;
         }
 
         if (!stop)
                 return;
 
-        log_unit_info(u->id, "Unit %s is bound to inactive unit. Stopping, too.", u->id);
+        assert(other);
+        log_unit_info(u->id, "Unit %s is bound to inactive unit %s. Stopping, too.", u->id, other->id);
 
         /* A unit we need to run is gone. Sniff. Let's stop this. */
         manager_add_job(u->manager, JOB_STOP, u, JOB_FAIL, true, NULL, NULL);
@@ -1801,10 +1797,7 @@ void unit_notify(Unit *u, UnitActiveState os, UnitActiveState ns, bool reload_su
         }
 
         /* Keep track of failed units */
-        if (ns == UNIT_FAILED)
-                set_put(u->manager->failed_units, u);
-        else
-                set_remove(u->manager->failed_units, u);
+        manager_update_failed_units(u->manager, u, ns == UNIT_FAILED);
 
         /* Make sure the cgroup is always removed when we become inactive */
         if (UNIT_IS_INACTIVE_OR_FAILED(ns))
@@ -2609,6 +2602,7 @@ int unit_serialize(Unit *u, FILE *f, FDSet *fds, bool serialize_jobs) {
                 unit_serialize_item(u, f, "assert-result", yes_no(u->assert_result));
 
         unit_serialize_item(u, f, "transient", yes_no(u->transient));
+        unit_serialize_item_format(u, f, "cpuacct-usage-base", "%" PRIu64, u->cpuacct_usage_base);
 
         if (u->cgroup_path)
                 unit_serialize_item(u, f, "cgroup", u->cgroup_path);
@@ -2783,6 +2777,12 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
                                 u->transient = b;
 
                         continue;
+                } else if (streq(l, "cpuacct-usage-base")) {
+
+                        r = safe_atou64(v, &u->cpuacct_usage_base);
+                        if (r < 0)
+                                log_debug("Failed to parse CPU usage %s", v);
+
                 } else if (streq(l, "cgroup")) {
                         char *s;
 
@@ -2794,8 +2794,7 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds) {
                                 void *p;
 
                                 p = hashmap_remove(u->manager->cgroup_unit, u->cgroup_path);
-                                log_info("Removing cgroup_path %s from hashmap (%p)",
-                                         u->cgroup_path, p);
+                                log_info("Removing cgroup_path %s from hashmap (%p)", u->cgroup_path, p);
                                 free(u->cgroup_path);
                         }
 
@@ -2841,11 +2840,10 @@ int unit_add_node_link(Unit *u, const char *what, bool wants) {
                 return -ENOMEM;
 
         r = manager_load_unit(u->manager, e, NULL, NULL, &device);
-
         if (r < 0)
                 return r;
 
-        r = unit_add_two_dependencies(u, UNIT_AFTER, UNIT_BINDS_TO, device, true);
+        r = unit_add_two_dependencies(u, UNIT_AFTER, u->manager->running_as == SYSTEMD_SYSTEM ? UNIT_BINDS_TO : UNIT_WANTS, device, true);
         if (r < 0)
                 return r;
 
@@ -2858,27 +2856,34 @@ int unit_add_node_link(Unit *u, const char *what, bool wants) {
         return 0;
 }
 
-int unit_coldplug(Unit *u) {
+static int unit_add_deserialized_job_coldplug(Unit *u) {
+        int r;
+
+        r = manager_add_job(u->manager, u->deserialized_job, u, JOB_IGNORE_REQUIREMENTS, false, NULL, NULL);
+        if (r < 0)
+                return r;
+
+        u->deserialized_job = _JOB_TYPE_INVALID;
+
+        return 0;
+}
+
+int unit_coldplug(Unit *u, Hashmap *deferred_work) {
         int r;
 
         assert(u);
 
         if (UNIT_VTABLE(u)->coldplug)
-                if ((r = UNIT_VTABLE(u)->coldplug(u)) < 0)
+                if ((r = UNIT_VTABLE(u)->coldplug(u, deferred_work)) < 0)
                         return r;
 
         if (u->job) {
                 r = job_coldplug(u->job);
                 if (r < 0)
                         return r;
-        } else if (u->deserialized_job >= 0) {
+        } else if (u->deserialized_job >= 0)
                 /* legacy */
-                r = manager_add_job(u->manager, u->deserialized_job, u, JOB_IGNORE_REQUIREMENTS, false, NULL, NULL);
-                if (r < 0)
-                        return r;
-
-                u->deserialized_job = _JOB_TYPE_INVALID;
-        }
+                hashmap_put(deferred_work, u, &unit_add_deserialized_job_coldplug);
 
         return 0;
 }
@@ -3011,7 +3016,7 @@ int unit_kill(Unit *u, KillWho w, int signo, sd_bus_error *error) {
         assert(signo < _NSIG);
 
         if (!UNIT_VTABLE(u)->kill)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         return UNIT_VTABLE(u)->kill(u, w, signo, error);
 }

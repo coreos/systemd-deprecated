@@ -21,7 +21,6 @@
 
 #include <unistd.h>
 
-#include "sd-messages.h"
 #include "conf-parser.h"
 #include "special.h"
 #include "sleep-config.h"
@@ -113,7 +112,7 @@ int manager_handle_action(
 
         if (!supported) {
                 log_warning("Requested operation not supported, ignoring.");
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 
         if (m->action_what) {

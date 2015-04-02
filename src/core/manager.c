@@ -19,7 +19,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
 #include <errno.h>
 #include <string.h>
 #include <signal.h>
@@ -27,14 +26,10 @@
 #include <unistd.h>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
-#include <poll.h>
 #include <sys/reboot.h>
 #include <sys/ioctl.h>
 #include <linux/kd.h>
-#include <termios.h>
 #include <fcntl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <dirent.h>
 #include <sys/timerfd.h>
 
@@ -43,7 +38,6 @@
 #endif
 
 #include "sd-daemon.h"
-#include "sd-id128.h"
 #include "sd-messages.h"
 
 #include "manager.h"
@@ -56,7 +50,6 @@
 #include "mkdir.h"
 #include "ratelimit.h"
 #include "locale-setup.h"
-#include "mount-setup.h"
 #include "unit-name.h"
 #include "missing.h"
 #include "path-lookup.h"
@@ -64,7 +57,6 @@
 #include "exit-status.h"
 #include "virt.h"
 #include "watchdog.h"
-#include "cgroup-util.h"
 #include "path-util.h"
 #include "audit-fd.h"
 #include "boot-timestamps.h"
@@ -93,16 +85,16 @@ static int manager_dispatch_run_queue(sd_event_source *source, void *userdata);
 static int manager_run_generators(Manager *m);
 static void manager_undo_generators(Manager *m);
 
-static int manager_watch_jobs_in_progress(Manager *m) {
+static void manager_watch_jobs_in_progress(Manager *m) {
         usec_t next;
 
         assert(m);
 
         if (m->jobs_in_progress_event_source)
-                return 0;
+                return;
 
         next = now(CLOCK_MONOTONIC) + JOBS_IN_PROGRESS_WAIT_USEC;
-        return sd_event_add_time(
+        (void) sd_event_add_time(
                         m->event,
                         &m->jobs_in_progress_event_source,
                         CLOCK_MONOTONIC,
@@ -186,8 +178,10 @@ static void manager_print_jobs_in_progress(Manager *m) {
 
         m->jobs_in_progress_iteration++;
 
-        if (m->n_running_jobs > 1)
-                asprintf(&job_of_n, "(%u of %u) ", counter, m->n_running_jobs);
+        if (m->n_running_jobs > 1) {
+                if (asprintf(&job_of_n, "(%u of %u) ", counter, m->n_running_jobs) < 0)
+                        job_of_n = NULL;
+        }
 
         format_timespan(time, sizeof(time), now(CLOCK_MONOTONIC) - j->begin_usec, 1*USEC_PER_SEC);
         if (job_get_timeout(j, &x) > 0)
@@ -844,7 +838,8 @@ static unsigned manager_dispatch_gc_queue(Manager *m) {
 
                 if (u->gc_marker == gc_marker + GC_OFFSET_BAD ||
                     u->gc_marker == gc_marker + GC_OFFSET_UNSURE) {
-                        log_unit_debug(u->id, "Collecting %s", u->id);
+                        if (u->id)
+                                log_unit_debug(u->id, "Collecting %s", u->id);
                         u->gc_marker = gc_marker + GC_OFFSET_BAD;
                         unit_add_to_cleanup_queue(u);
                 }
@@ -961,7 +956,7 @@ int manager_enumerate(Manager *m) {
                 int q;
 
                 if (unit_vtable[c]->supported && !unit_vtable[c]->supported(m)) {
-                        log_info("Unit type .%s is not supported on this system.", unit_type_to_string(c));
+                        log_debug("Unit type .%s is not supported on this system.", unit_type_to_string(c));
                         continue;
                 }
 
@@ -983,7 +978,28 @@ static int manager_coldplug(Manager *m) {
         Unit *u;
         char *k;
 
+        /*
+         * Some unit types tend to spawn jobs or check other units' state
+         * during coldplug. This is wrong because it is undefined whether the
+         * units in question have been already coldplugged (i. e. their state
+         * restored). This way, we can easily re-start an already started unit
+         * or otherwise make a wrong decision based on the unit's state.
+         *
+         * Solve this by providing a way for coldplug functions to defer
+         * such actions until after all units have been coldplugged.
+         *
+         * We store Unit* -> int(*)(Unit*).
+         *
+         * https://bugs.freedesktop.org/show_bug.cgi?id=88401
+         */
+        _cleanup_hashmap_free_ Hashmap *deferred_work = NULL;
+        int(*proc)(Unit*);
+
         assert(m);
+
+        deferred_work = hashmap_new(&trivial_hash_ops);
+        if (!deferred_work)
+                return -ENOMEM;
 
         /* Then, let's set up their initial state. */
         HASHMAP_FOREACH_KEY(u, k, m->units, i) {
@@ -993,7 +1009,17 @@ static int manager_coldplug(Manager *m) {
                 if (u->id != k)
                         continue;
 
-                q = unit_coldplug(u);
+                q = unit_coldplug(u, deferred_work);
+                if (q < 0)
+                        r = q;
+        }
+
+        /* After coldplugging and setting up initial state of the units,
+         * let's perform operations which spawn jobs or query units' state. */
+        HASHMAP_FOREACH_KEY(proc, u, deferred_work, i) {
+                int q;
+
+                q = proc(u);
                 if (q < 0)
                         r = q;
         }
@@ -2684,7 +2710,9 @@ void manager_check_finished(Manager *m) {
         if (hashmap_size(m->jobs) > 0) {
 
                 if (m->jobs_in_progress_event_source)
-                        sd_event_source_set_time(m->jobs_in_progress_event_source, now(CLOCK_MONOTONIC) + JOBS_IN_PROGRESS_WAIT_USEC);
+                        /* Ignore any failure, this is only for feedback */
+                        (void) sd_event_source_set_time(m->jobs_in_progress_event_source,
+                                                        now(CLOCK_MONOTONIC) + JOBS_IN_PROGRESS_WAIT_USEC);
 
                 return;
         }
@@ -2981,9 +3009,7 @@ static bool manager_get_show_status(Manager *m, StatusType type) {
         if (m->show_status > 0)
                 return true;
 
-        /* If Plymouth is running make sure we show the status, so
-         * that there's something nice to see when people press Esc */
-        return plymouth_running();
+        return false;
 }
 
 void manager_set_first_boot(Manager *m, bool b) {
@@ -3059,6 +3085,24 @@ const char *manager_get_runtime_prefix(Manager *m) {
         return m->running_as == SYSTEMD_SYSTEM ?
                "/run" :
                getenv("XDG_RUNTIME_DIR");
+}
+
+void manager_update_failed_units(Manager *m, Unit *u, bool failed) {
+        unsigned size;
+
+        assert(m);
+        assert(u->manager == m);
+
+        size = set_size(m->failed_units);
+
+        if (failed) {
+                if (set_put(m->failed_units, u) < 0)
+                        log_oom();
+        } else
+                set_remove(m->failed_units, u);
+
+        if (set_size(m->failed_units) != size)
+                bus_manager_send_change_signal(m);
 }
 
 ManagerState manager_state(Manager *m) {

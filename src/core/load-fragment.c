@@ -21,26 +21,18 @@
 ***/
 
 #include <linux/oom.h>
-#include <assert.h>
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sched.h>
-#include <sys/prctl.h>
-#include <sys/mount.h>
 #include <linux/fs.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <sys/resource.h>
-#include <sys/types.h>
-#include <grp.h>
 
 #ifdef HAVE_SECCOMP
 #include <seccomp.h>
 #endif
 
-#include "sd-messages.h"
 #include "unit.h"
 #include "strv.h"
 #include "conf-parser.h"
@@ -381,7 +373,7 @@ int config_parse_socket_listen(const char *unit,
                 }
 
                 if (socket_address_family(&p->address) != AF_LOCAL && p->address.type == SOCK_SEQPACKET) {
-                        log_syntax(unit, LOG_ERR, filename, line, ENOTSUP,
+                        log_syntax(unit, LOG_ERR, filename, line, EOPNOTSUPP,
                                    "Address family not supported, ignoring: %s", rvalue);
                         return 0;
                 }
@@ -633,8 +625,6 @@ int config_parse_exec(const char *unit,
                 }
 
                 n[k] = NULL;
-
-                log_debug("path: %s", path ?: n[0]);
 
                 if (!n[0])
                         reason = "Empty executable name or zeroeth argument";
@@ -3440,9 +3430,8 @@ static int open_follow(char **filename, FILE **_f, Set *names, char **_final) {
 
         f = fdopen(fd, "re");
         if (!f) {
-                r = -errno;
                 safe_close(fd);
-                return r;
+                return -errno;
         }
 
         *_f = f;

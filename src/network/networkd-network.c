@@ -22,7 +22,6 @@
 #include <ctype.h>
 #include <net/if.h>
 
-#include "path-util.h"
 #include "conf-files.h"
 #include "conf-parser.h"
 #include "util.h"
@@ -104,6 +103,7 @@ static int network_load_one(Manager *manager, const char *filename) {
         network->dhcp_routes = true;
         network->dhcp_sendhost = true;
         network->dhcp_route_metric = DHCP_ROUTE_METRIC;
+        network->dhcp_client_identifier = DHCP_CLIENT_ID_DUID;
 
         network->llmnr = LLMNR_SUPPORT_YES;
 
@@ -211,6 +211,7 @@ void network_free(Network *network) {
         strv_free(network->ntp);
         strv_free(network->dns);
         strv_free(network->domains);
+        strv_free(network->bind_carrier);
 
         netdev_unref(network->bridge);
 
@@ -295,7 +296,7 @@ int network_get(Manager *manager, struct udev_device *device,
 
                                 attr = udev_device_get_sysattr_value(device, "name_assign_type");
                                 if (attr)
-                                        (void)safe_atou8(attr, &name_assign_type);
+                                        (void) safe_atou8(attr, &name_assign_type);
 
                                 if (name_assign_type == NET_NAME_ENUM)
                                         log_warning("%-*s: found matching network '%s', based on potentially unpredictable ifname",
@@ -601,6 +602,14 @@ int config_parse_dhcp(
         *dhcp = s;
         return 0;
 }
+
+static const char* const dhcp_client_identifier_table[_DHCP_CLIENT_ID_MAX] = {
+        [DHCP_CLIENT_ID_MAC] = "mac",
+        [DHCP_CLIENT_ID_DUID] = "duid"
+};
+
+DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING(dhcp_client_identifier, DCHPClientIdentifier);
+DEFINE_CONFIG_PARSE_ENUM(config_parse_dhcp_client_identifier, dhcp_client_identifier, DCHPClientIdentifier, "Failed to parse client identifier type");
 
 static const char* const llmnr_support_table[_LLMNR_SUPPORT_MAX] = {
         [LLMNR_SUPPORT_NO] = "no",

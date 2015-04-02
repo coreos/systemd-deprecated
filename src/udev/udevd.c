@@ -26,25 +26,19 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include <ctype.h>
 #include <fcntl.h>
-#include <time.h>
 #include <getopt.h>
-#include <dirent.h>
 #include <sys/file.h>
 #include <sys/time.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/signalfd.h>
 #include <sys/epoll.h>
 #include <sys/mount.h>
-#include <poll.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/inotify.h>
-#include <sys/utsname.h>
 
 #include "sd-daemon.h"
 #include "rtnl-util.h"
@@ -89,6 +83,7 @@ struct event {
         struct udev_list_node node;
         struct udev *udev;
         struct udev_device *dev;
+        struct udev_device *dev_kernel;
         enum event_state state;
         int exitcode;
         unsigned long long int delaying_seqnum;
@@ -139,6 +134,7 @@ static inline struct worker *node_to_worker(struct udev_list_node *node) {
 static void event_queue_delete(struct event *event) {
         udev_list_node_remove(&event->node);
         udev_device_unref(event->dev);
+        udev_device_unref(event->dev_kernel);
         free(event);
 }
 
@@ -295,7 +291,7 @@ static void worker_new(struct event *event) {
                                         fd_lock = open(udev_device_get_devnode(d), O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
                                         if (fd_lock >= 0 && flock(fd_lock, LOCK_SH|LOCK_NB) < 0) {
                                                 log_debug_errno(errno, "Unable to flock(%s), skipping event handling: %m", udev_device_get_devnode(d));
-                                                err = -EWOULDBLOCK;
+                                                err = -EAGAIN;
                                                 fd_lock = safe_close(fd_lock);
                                                 goto skip;
                                         }
@@ -465,6 +461,8 @@ static int event_queue_insert(struct udev_device *dev) {
 
         event->udev = udev_device_get_udev(dev);
         event->dev = dev;
+        event->dev_kernel = udev_device_shallow_clone(dev);
+        udev_device_copy_properties(event->dev_kernel, dev);
         event->seqnum = udev_device_get_seqnum(dev);
         event->devpath = udev_device_get_devpath(dev);
         event->devpath_len = strlen(event->devpath);
@@ -892,6 +890,11 @@ static void handle_signal(struct udev *udev, int signo) {
                                                 log_error("worker ["PID_FMT"] failed while handling '%s'",
                                                           pid, worker->event->devpath);
                                                 worker->event->exitcode = -32;
+                                                /* delete state from disk */
+                                                udev_device_delete_db(worker->event->dev);
+                                                udev_device_tag_index(worker->event->dev, NULL, false);
+                                                /* forward kernel event without ammending it */
+                                                udev_monitor_send_device(monitor, NULL, worker->event->dev_kernel);
                                                 event_queue_delete(worker->event);
 
                                                 /* drop reference taken for state 'running' */
@@ -906,6 +909,20 @@ static void handle_signal(struct udev *udev, int signo) {
         case SIGHUP:
                 reload = true;
                 break;
+        }
+}
+
+static void event_queue_update(void) {
+        int r;
+
+        if (!udev_list_node_is_empty(&event_list)) {
+                r = touch("/run/udev/queue");
+                if (r < 0)
+                        log_warning_errno(r, "could not touch /run/udev/queue: %m");
+        } else {
+                r = unlink("/run/udev/queue");
+                if (r < 0 && errno != ENOENT)
+                        log_warning("could not unlink /run/udev/queue: %m");
         }
 }
 
@@ -1369,15 +1386,7 @@ int main(int argc, char *argv[]) {
                 }
 
                 /* tell settle that we are busy or idle */
-                if (!udev_list_node_is_empty(&event_list)) {
-                        int fd;
-
-                        fd = open("/run/udev/queue", O_WRONLY|O_CREAT|O_CLOEXEC|O_TRUNC|O_NOFOLLOW, 0444);
-                        if (fd >= 0)
-                                close(fd);
-                } else {
-                        unlink("/run/udev/queue");
-                }
+                event_queue_update();
 
                 fdcount = epoll_wait(fd_ep, ev, ELEMENTSOF(ev), timeout);
                 if (fdcount < 0)
@@ -1414,12 +1423,8 @@ int main(int argc, char *argv[]) {
                                                 kill(worker->pid, SIGKILL);
                                                 worker->state = WORKER_KILLED;
 
-                                                /* drop reference taken for state 'running' */
-                                                worker_unref(worker);
                                                 log_error("seq %llu '%s' killed", udev_device_get_seqnum(worker->event->dev), worker->event->devpath);
                                                 worker->event->exitcode = -64;
-                                                event_queue_delete(worker->event);
-                                                worker->event = NULL;
                                         } else if (!worker->event_warned) {
                                                 log_warning("worker ["PID_FMT"] %s is taking a long time", worker->pid, worker->event->devpath);
                                                 worker->event_warned = true;
@@ -1469,8 +1474,8 @@ int main(int argc, char *argv[]) {
                         struct udev_device *dev;
 
                         dev = udev_monitor_receive_device(monitor);
-                        if (dev != NULL) {
-                                udev_device_set_usec_initialized(dev, now(CLOCK_MONOTONIC));
+                        if (dev) {
+                                udev_device_ensure_usec_initialized(dev, NULL);
                                 if (event_queue_insert(dev) < 0)
                                         udev_device_unref(dev);
                         }
@@ -1501,6 +1506,11 @@ int main(int argc, char *argv[]) {
                 /* device node watch */
                 if (is_inotify)
                         handle_inotify(udev);
+
+                /* tell settle that we are busy or idle, this needs to be before the
+                 * PING handling
+                 */
+                event_queue_update();
 
                 /*
                  * This needs to be after the inotify handling, to make sure,

@@ -28,12 +28,14 @@
 #include "btrfs-util.h"
 #include "utf8.h"
 #include "mkdir.h"
+#include "path-util.h"
 #include "import-util.h"
 #include "curl-util.h"
 #include "aufs-util.h"
-#include "import-job.h"
+#include "pull-job.h"
+#include "pull-common.h"
 #include "import-common.h"
-#include "import-dkr.h"
+#include "pull-dkr.h"
 
 typedef enum DkrProgress {
         DKR_SEARCHING,
@@ -43,18 +45,18 @@ typedef enum DkrProgress {
         DKR_COPYING,
 } DkrProgress;
 
-struct DkrImport {
+struct DkrPull {
         sd_event *event;
         CurlGlue *glue;
 
         char *index_url;
         char *image_root;
 
-        ImportJob *images_job;
-        ImportJob *tags_job;
-        ImportJob *ancestry_job;
-        ImportJob *json_job;
-        ImportJob *layer_job;
+        PullJob *images_job;
+        PullJob *tags_job;
+        PullJob *ancestry_job;
+        PullJob *json_job;
+        PullJob *layer_job;
 
         char *name;
         char *tag;
@@ -67,11 +69,12 @@ struct DkrImport {
         unsigned n_ancestry;
         unsigned current_ancestry;
 
-        DkrImportFinished on_finished;
+        DkrPullFinished on_finished;
         void *userdata;
 
         char *local;
         bool force_local;
+        bool grow_machine_directory;
 
         char *temp_path;
         char *final_path;
@@ -86,9 +89,9 @@ struct DkrImport {
 
 #define LAYERS_MAX 2048
 
-static void dkr_import_job_on_finished(ImportJob *j);
+static void dkr_pull_job_on_finished(PullJob *j);
 
-DkrImport* dkr_import_unref(DkrImport *i) {
+DkrPull* dkr_pull_unref(DkrPull *i) {
         if (!i)
                 return NULL;
 
@@ -97,11 +100,11 @@ DkrImport* dkr_import_unref(DkrImport *i) {
                 (void) wait_for_terminate(i->tar_pid, NULL);
         }
 
-        import_job_unref(i->images_job);
-        import_job_unref(i->tags_job);
-        import_job_unref(i->ancestry_job);
-        import_job_unref(i->json_job);
-        import_job_unref(i->layer_job);
+        pull_job_unref(i->images_job);
+        pull_job_unref(i->tags_job);
+        pull_job_unref(i->ancestry_job);
+        pull_job_unref(i->json_job);
+        pull_job_unref(i->layer_job);
 
         curl_glue_unref(i->glue);
         sd_event_unref(i->event);
@@ -127,15 +130,15 @@ DkrImport* dkr_import_unref(DkrImport *i) {
         return NULL;
 }
 
-int dkr_import_new(
-                DkrImport **ret,
+int dkr_pull_new(
+                DkrPull **ret,
                 sd_event *event,
                 const char *index_url,
                 const char *image_root,
-                DkrImportFinished on_finished,
+                DkrPullFinished on_finished,
                 void *userdata) {
 
-        _cleanup_(dkr_import_unrefp) DkrImport *i = NULL;
+        _cleanup_(dkr_pull_unrefp) DkrPull *i = NULL;
         char *e;
         int r;
 
@@ -145,7 +148,7 @@ int dkr_import_new(
         if (!http_url_is_valid(index_url))
                 return -EINVAL;
 
-        i = new0(DkrImport, 1);
+        i = new0(DkrPull, 1);
         if (!i)
                 return -ENOMEM;
 
@@ -155,6 +158,8 @@ int dkr_import_new(
         i->image_root = strdup(image_root ?: "/var/lib/machines");
         if (!i->image_root)
                 return -ENOMEM;
+
+        i->grow_machine_directory = path_startswith(i->image_root, "/var/lib/machines");
 
         i->index_url = strdup(index_url);
         if (!i->index_url)
@@ -176,7 +181,7 @@ int dkr_import_new(
         if (r < 0)
                 return r;
 
-        i->glue->on_finished = import_job_curl_on_finished;
+        i->glue->on_finished = pull_job_curl_on_finished;
         i->glue->userdata = i;
 
         *ret = i;
@@ -185,7 +190,7 @@ int dkr_import_new(
         return 0;
 }
 
-static void dkr_import_report_progress(DkrImport *i, DkrProgress p) {
+static void dkr_pull_report_progress(DkrPull *i, DkrProgress p) {
         unsigned percent;
 
         assert(i);
@@ -371,7 +376,7 @@ static int parse_ancestry(const void *payload, size_t size, char ***ret) {
         }
 }
 
-static const char *dkr_import_current_layer(DkrImport *i) {
+static const char *dkr_pull_current_layer(DkrPull *i) {
         assert(i);
 
         if (strv_isempty(i->ancestry))
@@ -380,7 +385,7 @@ static const char *dkr_import_current_layer(DkrImport *i) {
         return i->ancestry[i->current_ancestry];
 }
 
-static const char *dkr_import_current_base_layer(DkrImport *i) {
+static const char *dkr_pull_current_base_layer(DkrPull *i) {
         assert(i);
 
         if (strv_isempty(i->ancestry))
@@ -392,7 +397,7 @@ static const char *dkr_import_current_base_layer(DkrImport *i) {
         return i->ancestry[i->current_ancestry-1];
 }
 
-static int dkr_import_add_token(DkrImport *i, ImportJob *j) {
+static int dkr_pull_add_token(DkrPull *i, PullJob *j) {
         const char *t;
 
         assert(i);
@@ -410,32 +415,32 @@ static int dkr_import_add_token(DkrImport *i, ImportJob *j) {
         return 0;
 }
 
-static bool dkr_import_is_done(DkrImport *i) {
+static bool dkr_pull_is_done(DkrPull *i) {
         assert(i);
         assert(i->images_job);
 
-        if (i->images_job->state != IMPORT_JOB_DONE)
+        if (i->images_job->state != PULL_JOB_DONE)
                 return false;
 
-        if (!i->tags_job || i->tags_job->state != IMPORT_JOB_DONE)
+        if (!i->tags_job || i->tags_job->state != PULL_JOB_DONE)
                 return false;
 
-        if (!i->ancestry_job || i->ancestry_job->state != IMPORT_JOB_DONE)
+        if (!i->ancestry_job || i->ancestry_job->state != PULL_JOB_DONE)
                 return false;
 
-        if (!i->json_job || i->json_job->state != IMPORT_JOB_DONE)
+        if (!i->json_job || i->json_job->state != PULL_JOB_DONE)
                 return false;
 
-        if (i->layer_job && i->layer_job->state != IMPORT_JOB_DONE)
+        if (i->layer_job && i->layer_job->state != PULL_JOB_DONE)
                 return false;
 
-        if (dkr_import_current_layer(i))
+        if (dkr_pull_current_layer(i))
                 return false;
 
         return true;
 }
 
-static int dkr_import_make_local_copy(DkrImport *i) {
+static int dkr_pull_make_local_copy(DkrPull *i) {
         int r;
 
         assert(i);
@@ -449,16 +454,16 @@ static int dkr_import_make_local_copy(DkrImport *i) {
                         return log_oom();
         }
 
-        r = import_make_local_copy(i->final_path, i->image_root, i->local, i->force_local);
+        r = pull_make_local_copy(i->final_path, i->image_root, i->local, i->force_local);
         if (r < 0)
                 return r;
 
         return 0;
 }
 
-static int dkr_import_job_on_open_disk(ImportJob *j) {
+static int dkr_pull_job_on_open_disk(PullJob *j) {
         const char *base;
-        DkrImport *i;
+        DkrPull *i;
         int r;
 
         assert(j);
@@ -476,7 +481,7 @@ static int dkr_import_job_on_open_disk(ImportJob *j) {
 
         mkdir_parents_label(i->temp_path, 0700);
 
-        base = dkr_import_current_base_layer(i);
+        base = dkr_pull_current_base_layer(i);
         if (base) {
                 const char *base_path;
 
@@ -487,22 +492,22 @@ static int dkr_import_job_on_open_disk(ImportJob *j) {
         if (r < 0)
                 return log_error_errno(r, "Failed to make btrfs subvolume %s: %m", i->temp_path);
 
-        j->disk_fd = import_fork_tar(i->temp_path, &i->tar_pid);
+        j->disk_fd = import_fork_tar_x(i->temp_path, &i->tar_pid);
         if (j->disk_fd < 0)
                 return j->disk_fd;
 
         return 0;
 }
 
-static void dkr_import_job_on_progress(ImportJob *j) {
-        DkrImport *i;
+static void dkr_pull_job_on_progress(PullJob *j) {
+        DkrPull *i;
 
         assert(j);
         assert(j->userdata);
 
         i = j->userdata;
 
-        dkr_import_report_progress(
+        dkr_pull_report_progress(
                         i,
                         j == i->images_job                       ? DKR_SEARCHING :
                         j == i->tags_job                         ? DKR_RESOLVING :
@@ -510,7 +515,7 @@ static void dkr_import_job_on_progress(ImportJob *j) {
                                                                    DKR_DOWNLOADING);
 }
 
-static int dkr_import_pull_layer(DkrImport *i) {
+static int dkr_pull_pull_layer(DkrPull *i) {
         _cleanup_free_ char *path = NULL;
         const char *url, *layer = NULL;
         int r;
@@ -521,7 +526,7 @@ static int dkr_import_pull_layer(DkrImport *i) {
         assert(!i->final_path);
 
         for (;;) {
-                layer = dkr_import_current_layer(i);
+                layer = dkr_pull_current_layer(i);
                 if (!layer)
                         return 0; /* no more layers */
 
@@ -550,27 +555,28 @@ static int dkr_import_pull_layer(DkrImport *i) {
         path = NULL;
 
         url = strjoina(PROTOCOL_PREFIX, i->response_registries[0], "/v1/images/", layer, "/layer");
-        r = import_job_new(&i->layer_job, url, i->glue, i);
+        r = pull_job_new(&i->layer_job, url, i->glue, i);
         if (r < 0)
                 return log_error_errno(r, "Failed to allocate layer job: %m");
 
-        r = dkr_import_add_token(i, i->layer_job);
+        r = dkr_pull_add_token(i, i->layer_job);
         if (r < 0)
                 return log_oom();
 
-        i->layer_job->on_finished = dkr_import_job_on_finished;
-        i->layer_job->on_open_disk = dkr_import_job_on_open_disk;
-        i->layer_job->on_progress = dkr_import_job_on_progress;
+        i->layer_job->on_finished = dkr_pull_job_on_finished;
+        i->layer_job->on_open_disk = dkr_pull_job_on_open_disk;
+        i->layer_job->on_progress = dkr_pull_job_on_progress;
+        i->layer_job->grow_machine_directory = i->grow_machine_directory;
 
-        r = import_job_begin(i->layer_job);
+        r = pull_job_begin(i->layer_job);
         if (r < 0)
                 return log_error_errno(r, "Failed to start layer job: %m");
 
         return 0;
 }
 
-static void dkr_import_job_on_finished(ImportJob *j) {
-        DkrImport *i;
+static void dkr_pull_job_on_finished(PullJob *j) {
+        DkrPull *i;
         int r;
 
         assert(j);
@@ -608,25 +614,25 @@ static void dkr_import_job_on_finished(ImportJob *j) {
                 }
 
                 log_info("Index lookup succeeded, directed to registry %s.", i->response_registries[0]);
-                dkr_import_report_progress(i, DKR_RESOLVING);
+                dkr_pull_report_progress(i, DKR_RESOLVING);
 
                 url = strjoina(PROTOCOL_PREFIX, i->response_registries[0], "/v1/repositories/", i->name, "/tags/", i->tag);
-                r = import_job_new(&i->tags_job, url, i->glue, i);
+                r = pull_job_new(&i->tags_job, url, i->glue, i);
                 if (r < 0) {
                         log_error_errno(r, "Failed to allocate tags job: %m");
                         goto finish;
                 }
 
-                r = dkr_import_add_token(i, i->tags_job);
+                r = dkr_pull_add_token(i, i->tags_job);
                 if (r < 0) {
                         log_oom();
                         goto finish;
                 }
 
-                i->tags_job->on_finished = dkr_import_job_on_finished;
-                i->tags_job->on_progress = dkr_import_job_on_progress;
+                i->tags_job->on_finished = dkr_pull_job_on_finished;
+                i->tags_job->on_progress = dkr_pull_job_on_progress;
 
-                r = import_job_begin(i->tags_job);
+                r = pull_job_begin(i->tags_job);
                 if (r < 0) {
                         log_error_errno(r, "Failed to start tags job: %m");
                         goto finish;
@@ -650,47 +656,47 @@ static void dkr_import_job_on_finished(ImportJob *j) {
                 i->id = id;
 
                 log_info("Tag lookup succeeded, resolved to layer %s.", i->id);
-                dkr_import_report_progress(i, DKR_METADATA);
+                dkr_pull_report_progress(i, DKR_METADATA);
 
                 url = strjoina(PROTOCOL_PREFIX, i->response_registries[0], "/v1/images/", i->id, "/ancestry");
-                r = import_job_new(&i->ancestry_job, url, i->glue, i);
+                r = pull_job_new(&i->ancestry_job, url, i->glue, i);
                 if (r < 0) {
                         log_error_errno(r, "Failed to allocate ancestry job: %m");
                         goto finish;
                 }
 
-                r = dkr_import_add_token(i, i->ancestry_job);
+                r = dkr_pull_add_token(i, i->ancestry_job);
                 if (r < 0) {
                         log_oom();
                         goto finish;
                 }
 
-                i->ancestry_job->on_finished = dkr_import_job_on_finished;
-                i->ancestry_job->on_progress = dkr_import_job_on_progress;
+                i->ancestry_job->on_finished = dkr_pull_job_on_finished;
+                i->ancestry_job->on_progress = dkr_pull_job_on_progress;
 
                 url = strjoina(PROTOCOL_PREFIX, i->response_registries[0], "/v1/images/", i->id, "/json");
-                r = import_job_new(&i->json_job, url, i->glue, i);
+                r = pull_job_new(&i->json_job, url, i->glue, i);
                 if (r < 0) {
                         log_error_errno(r, "Failed to allocate json job: %m");
                         goto finish;
                 }
 
-                r = dkr_import_add_token(i, i->json_job);
+                r = dkr_pull_add_token(i, i->json_job);
                 if (r < 0) {
                         log_oom();
                         goto finish;
                 }
 
-                i->json_job->on_finished = dkr_import_job_on_finished;
-                i->json_job->on_progress = dkr_import_job_on_progress;
+                i->json_job->on_finished = dkr_pull_job_on_finished;
+                i->json_job->on_progress = dkr_pull_job_on_progress;
 
-                r = import_job_begin(i->ancestry_job);
+                r = pull_job_begin(i->ancestry_job);
                 if (r < 0) {
                         log_error_errno(r, "Failed to start ancestry job: %m");
                         goto finish;
                 }
 
-                r = import_job_begin(i->json_job);
+                r = pull_job_begin(i->json_job);
                 if (r < 0) {
                         log_error_errno(r, "Failed to start json job: %m");
                         goto finish;
@@ -725,9 +731,9 @@ static void dkr_import_job_on_finished(ImportJob *j) {
                 i->n_ancestry = n;
                 i->current_ancestry = 0;
 
-                dkr_import_report_progress(i, DKR_DOWNLOADING);
+                dkr_pull_report_progress(i, DKR_DOWNLOADING);
 
-                r = dkr_import_pull_layer(i);
+                r = dkr_pull_pull_layer(i);
                 if (r < 0)
                         goto finish;
 
@@ -763,26 +769,26 @@ static void dkr_import_job_on_finished(ImportJob *j) {
 
                 log_info("Completed writing to layer %s.", i->final_path);
 
-                i->layer_job = import_job_unref(i->layer_job);
+                i->layer_job = pull_job_unref(i->layer_job);
                 free(i->temp_path);
                 i->temp_path = NULL;
                 free(i->final_path);
                 i->final_path = NULL;
 
                 i->current_ancestry ++;
-                r = dkr_import_pull_layer(i);
+                r = dkr_pull_pull_layer(i);
                 if (r < 0)
                         goto finish;
 
         } else if (i->json_job != j)
                 assert_not_reached("Got finished event for unknown curl object");
 
-        if (!dkr_import_is_done(i))
+        if (!dkr_pull_is_done(i))
                 return;
 
-        dkr_import_report_progress(i, DKR_COPYING);
+        dkr_pull_report_progress(i, DKR_COPYING);
 
-        r = dkr_import_make_local_copy(i);
+        r = dkr_pull_make_local_copy(i);
         if (r < 0)
                 goto finish;
 
@@ -795,10 +801,10 @@ finish:
                 sd_event_exit(i->event, r);
 }
 
-static int dkr_import_job_on_header(ImportJob *j, const char *header, size_t sz)  {
+static int dkr_pull_job_on_header(PullJob *j, const char *header, size_t sz)  {
         _cleanup_free_ char *registry = NULL;
         char *token;
-        DkrImport *i;
+        DkrPull *i;
         int r;
 
         assert(j);
@@ -840,7 +846,7 @@ static int dkr_import_job_on_header(ImportJob *j, const char *header, size_t sz)
         return 0;
 }
 
-int dkr_import_pull(DkrImport *i, const char *name, const char *tag, const char *local, bool force_local) {
+int dkr_pull_start(DkrPull *i, const char *name, const char *tag, const char *local, bool force_local) {
         const char *url;
         int r;
 
@@ -875,17 +881,17 @@ int dkr_import_pull(DkrImport *i, const char *name, const char *tag, const char 
 
         url = strjoina(i->index_url, "/v1/repositories/", name, "/images");
 
-        r = import_job_new(&i->images_job, url, i->glue, i);
+        r = pull_job_new(&i->images_job, url, i->glue, i);
         if (r < 0)
                 return r;
 
-        r = dkr_import_add_token(i, i->images_job);
+        r = dkr_pull_add_token(i, i->images_job);
         if (r < 0)
                 return r;
 
-        i->images_job->on_finished = dkr_import_job_on_finished;
-        i->images_job->on_header = dkr_import_job_on_header;
-        i->images_job->on_progress = dkr_import_job_on_progress;
+        i->images_job->on_finished = dkr_pull_job_on_finished;
+        i->images_job->on_header = dkr_pull_job_on_header;
+        i->images_job->on_progress = dkr_pull_job_on_progress;
 
-        return import_job_begin(i->images_job);
+        return pull_job_begin(i->images_job);
 }

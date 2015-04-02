@@ -21,7 +21,6 @@
 
 #include <errno.h>
 #include <signal.h>
-#include <dirent.h>
 #include <unistd.h>
 
 #include "async.h"
@@ -556,14 +555,16 @@ static int service_add_extras(Service *s) {
                 s->notify_access = NOTIFY_MAIN;
 
         if (s->bus_name) {
+#ifdef ENABLE_KDBUS
                 const char *n;
-
-                r = unit_watch_bus_name(UNIT(s), s->bus_name);
-                if (r < 0)
-                        return r;
 
                 n = strjoina(s->bus_name, ".busname");
                 r = unit_add_dependency_by_name(UNIT(s), UNIT_AFTER, n, NULL, true);
+                if (r < 0)
+                        return r;
+#endif
+
+                r = unit_watch_bus_name(UNIT(s), s->bus_name);
                 if (r < 0)
                         return r;
         }
@@ -879,7 +880,7 @@ static void service_set_state(Service *s, ServiceState state) {
         s->reload_result = SERVICE_SUCCESS;
 }
 
-static int service_coldplug(Unit *u) {
+static int service_coldplug(Unit *u, Hashmap *deferred_work) {
         Service *s = SERVICE(u);
         int r;
 
@@ -1058,7 +1059,11 @@ static int service_spawn(
         assert(c);
         assert(_pid);
 
-        unit_realize_cgroup(UNIT(s));
+        (void) unit_realize_cgroup(UNIT(s));
+        if (s->reset_cpu_usage) {
+                (void) unit_reset_cpu_usage(UNIT(s));
+                s->reset_cpu_usage = false;
+        }
 
         r = unit_setup_exec_runtime(UNIT(s));
         if (r < 0)
@@ -1092,7 +1097,7 @@ static int service_spawn(
         if (r < 0)
                 goto fail;
 
-        our_env = new0(char*, 4);
+        our_env = new0(char*, 6);
         if (!our_env) {
                 r = -ENOMEM;
                 goto fail;
@@ -1115,6 +1120,46 @@ static int service_spawn(
                         r = -ENOMEM;
                         goto fail;
                 }
+
+        if (UNIT_DEREF(s->accept_socket)) {
+                union sockaddr_union sa;
+                socklen_t salen = sizeof(sa);
+
+                r = getpeername(s->socket_fd, &sa.sa, &salen);
+                if (r < 0) {
+                        r = -errno;
+                        goto fail;
+                }
+
+                if (IN_SET(sa.sa.sa_family, AF_INET, AF_INET6)) {
+                        _cleanup_free_ char *addr = NULL;
+                        char *t;
+                        int port;
+
+                        r = sockaddr_pretty(&sa.sa, salen, true, false, &addr);
+                        if (r < 0)
+                                goto fail;
+
+                        t = strappend("REMOTE_ADDR=", addr);
+                        if (!t) {
+                                r = -ENOMEM;
+                                goto fail;
+                        }
+                        our_env[n_env++] = t;
+
+                        port = sockaddr_port(&sa.sa);
+                        if (port < 0) {
+                                r = port;
+                                goto fail;
+                        }
+
+                        if (asprintf(&t, "REMOTE_PORT=%u", port) < 0) {
+                                r = -ENOMEM;
+                                goto fail;
+                        }
+                        our_env[n_env++] = t;
+                }
+        }
 
         final_env = strv_env_merge(2, UNIT(s)->manager->environment, our_env, NULL);
         if (!final_env) {
@@ -1829,6 +1874,7 @@ static int service_start(Unit *u) {
         s->main_pid_known = false;
         s->main_pid_alien = false;
         s->forbid_restart = false;
+        s->reset_cpu_usage = true;
 
         free(s->status_text);
         s->status_text = NULL;

@@ -23,14 +23,11 @@
  ***/
 
 #include <stdio.h>
-#include <stdarg.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <limits.h>
 #include <unistd.h>
 #include <sys/utsname.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 
 #include "util.h"
@@ -1170,7 +1167,7 @@ static void svg_ps_bars(void) {
 
                 ps->sample = ps->sample->next;
                 sample_hz = ps->sample;
-                for (ii=0;((ii<(int)arg_hz/2)&&(ps->sample->next));ii++)
+                for (ii=0;((ii<(int)arg_hz/2)&&(sample_hz->next));ii++)
                         sample_hz = sample_hz->next;
 
                 /* subtract bootchart cpu utilization from total */

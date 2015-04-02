@@ -31,13 +31,7 @@ typedef enum UnitActiveState UnitActiveState;
 typedef struct UnitRef UnitRef;
 typedef struct UnitStatusMessageFormats UnitStatusMessageFormats;
 
-#include "sd-event.h"
-#include "set.h"
-#include "util.h"
 #include "list.h"
-#include "socket-util.h"
-#include "execute.h"
-#include "cgroup.h"
 #include "condition.h"
 #include "install.h"
 #include "unit-name.h"
@@ -76,7 +70,6 @@ static inline bool UNIT_IS_INACTIVE_OR_FAILED(UnitActiveState t) {
         return t == UNIT_INACTIVE || t == UNIT_FAILED;
 }
 
-#include "manager.h"
 #include "job.h"
 
 struct UnitRef {
@@ -183,6 +176,9 @@ struct Unit {
         UnitFileState unit_file_state;
         int unit_file_preset;
 
+        /* Where the cpuacct.usage cgroup counter was at the time the unit was started */
+        nsec_t cpuacct_usage_base;
+
         /* Counterparts in the cgroup filesystem */
         char *cgroup_path;
         CGroupControllerMask cgroup_realized_mask;
@@ -249,13 +245,11 @@ typedef enum UnitSetPropertiesMode {
         UNIT_PERSISTENT = 2,
 } UnitSetPropertiesMode;
 
-#include "service.h"
 #include "socket.h"
 #include "busname.h"
 #include "target.h"
 #include "snapshot.h"
 #include "device.h"
-#include "mount.h"
 #include "automount.h"
 #include "swap.h"
 #include "timer.h"
@@ -307,8 +301,14 @@ struct UnitVTable {
         int (*load)(Unit *u);
 
         /* If a lot of units got created via enumerate(), this is
-         * where to actually set the state and call unit_notify(). */
-        int (*coldplug)(Unit *u);
+         * where to actually set the state and call unit_notify().
+         *
+         * This must not reference other units (maybe implicitly through spawning
+         * jobs), because it is possible that they are not yet coldplugged.
+         * Such actions must be deferred until the end of coldplug bу adding
+         * a "Unit* -> int(*)(Unit*)" entry into the hashmap.
+         */
+        int (*coldplug)(Unit *u, Hashmap *deferred_work);
 
         void (*dump)(Unit *u, FILE *f, const char *prefix);
 
@@ -544,7 +544,7 @@ int unit_deserialize(Unit *u, FILE *f, FDSet *fds);
 
 int unit_add_node_link(Unit *u, const char *what, bool wants);
 
-int unit_coldplug(Unit *u);
+int unit_coldplug(Unit *u, Hashmap *deferred_work);
 
 void unit_status_printf(Unit *u, const char *status, const char *unit_status_msg_format) _printf_(3, 0);
 

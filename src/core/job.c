@@ -19,10 +19,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
 #include <errno.h>
-#include <sys/timerfd.h>
-#include <sys/epoll.h>
 
 #include "sd-id128.h"
 #include "sd-messages.h"
@@ -30,8 +27,6 @@
 #include "unit.h"
 #include "macro.h"
 #include "strv.h"
-#include "load-fragment.h"
-#include "load-dropin.h"
 #include "log.h"
 #include "dbus-job.h"
 #include "special.h"
@@ -322,8 +317,8 @@ void job_dump(Job *j, FILE*f, const char *prefix) {
  * the JOB_RELOAD_OR_START, which lies outside the lookup function's domain),
  * the following properties hold:
  *
- * Merging is associative! A merged with B merged with C is the same as
- * A merged with C merged with B.
+ * Merging is associative! A merged with B, and then merged with C is the same
+ * as A merged with the result of B merged with C.
  *
  * Mergeability is transitive! If A can be merged with B and B with C then
  * A also with C.
@@ -578,7 +573,7 @@ int job_run_and_invalidate(Job *j) {
                         r = job_finish_and_invalidate(j, JOB_INVALID, true);
                 else if (r == -EPROTO)
                         r = job_finish_and_invalidate(j, JOB_ASSERT, true);
-                else if (r == -ENOTSUP)
+                else if (r == -EOPNOTSUPP)
                         r = job_finish_and_invalidate(j, JOB_UNSUPPORTED, true);
                 else if (r == -EAGAIN)
                         job_set_state(j, JOB_WAITING);

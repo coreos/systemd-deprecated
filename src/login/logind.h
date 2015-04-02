@@ -22,12 +22,10 @@
 ***/
 
 #include <stdbool.h>
-#include <inttypes.h>
 #include <libudev.h>
 
 #include "sd-event.h"
 #include "sd-bus.h"
-#include "util.h"
 #include "list.h"
 #include "hashmap.h"
 #include "set.h"
@@ -35,15 +33,9 @@
 typedef struct Manager Manager;
 
 #include "logind-device.h"
-#include "logind-seat.h"
-#include "logind-session.h"
-#include "logind-user.h"
 #include "logind-inhibit.h"
 #include "logind-button.h"
 #include "logind-action.h"
-
-#define IGNORE_LID_SWITCH_STARTUP_USEC (3 * USEC_PER_MINUTE)
-#define IGNORE_LID_SWITCH_SUSPEND_USEC (30 * USEC_PER_SEC)
 
 struct Manager {
         sd_event *event;
@@ -125,6 +117,7 @@ struct Manager {
 
         Hashmap *polkit_registry;
 
+        usec_t holdoff_timeout_usec;
         sd_event_source *lid_switch_ignore_event_source;
 
         size_t runtime_dir_size;

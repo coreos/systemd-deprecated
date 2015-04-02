@@ -35,7 +35,6 @@
 #include "pager.h"
 #include "macro.h"
 #include "journal-internal.h"
-#include "copy.h"
 #include "compress.h"
 #include "sigbus.h"
 
@@ -650,7 +649,7 @@ static int save_core(sd_journal *j, int fd, char **path, bool *unlink_temp) {
                         }
 #else
                         log_error("Cannot decompress file. Compiled without compression support.");
-                        r = -ENOTSUP;
+                        r = -EOPNOTSUPP;
                         goto error;
 #endif
                 } else {

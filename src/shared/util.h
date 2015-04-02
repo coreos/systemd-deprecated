@@ -25,7 +25,6 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <time.h>
-#include <sys/time.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -34,14 +33,13 @@
 #include <sched.h>
 #include <limits.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#include <sys/resource.h>
 #include <stddef.h>
 #include <unistd.h>
 #include <locale.h>
 #include <mntent.h>
-#include <sys/socket.h>
 #include <sys/inotify.h>
 
 #if SIZEOF_PID_T == 4
@@ -88,6 +86,9 @@
 #include "macro.h"
 #include "missing.h"
 #include "time-util.h"
+
+/* Maximum length of a domain name. See RFC 1035 */
+#define DOMAIN_NAME_MAX 255
 
 /* What is interpreted as whitespace? */
 #define WHITESPACE " \t\n\r"
@@ -434,6 +435,7 @@ int sigaction_many(const struct sigaction *sa, ...);
 int fopen_temporary(const char *path, FILE **_f, char **_temp_path);
 
 ssize_t loop_read(int fd, void *buf, size_t nbytes, bool do_poll);
+int loop_read_exact(int fd, void *buf, size_t nbytes, bool do_poll);
 int loop_write(int fd, const void *buf, size_t nbytes, bool do_poll);
 
 bool is_device_path(const char *path);
@@ -553,6 +555,7 @@ bool nulstr_contains(const char*nulstr, const char *needle);
 bool plymouth_running(void);
 
 bool hostname_is_valid(const char *s) _pure_;
+bool domainname_is_valid(const char *s) _pure_;
 char* hostname_cleanup(char *s, bool lowercase);
 
 bool machine_name_is_valid(const char *s) _pure_;
@@ -737,6 +740,8 @@ void *xbsearch_r(const void *key, const void *base, size_t nmemb, size_t size,
                  int (*compar) (const void *, const void *, void *),
                  void *arg);
 
+#define _(String) gettext (String)
+void init_gettext(void);
 bool is_locale_utf8(void);
 
 typedef enum DrawSpecialChar {
@@ -1052,6 +1057,7 @@ int same_fd(int a, int b);
 
 int chattr_fd(int fd, bool b, unsigned mask);
 int chattr_path(const char *p, bool b, unsigned mask);
+int change_attr_fd(int fd, unsigned value, unsigned mask);
 
 int read_attr_fd(int fd, unsigned *ret);
 int read_attr_path(const char *p, unsigned *ret);
@@ -1078,3 +1084,7 @@ void sigkill_wait(pid_t *pid);
 #define _cleanup_sigkill_wait_ _cleanup_(sigkill_wait)
 
 int syslog_parse_priority(const char **p, int *priority, bool with_facility);
+
+void cmsg_close_all(struct msghdr *mh);
+
+int rename_noreplace(int olddirfd, const char *oldpath, int newdirfd, const char *newpath);

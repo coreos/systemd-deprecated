@@ -34,7 +34,6 @@
 #include "bus-bloom.h"
 #include "bus-util.h"
 #include "capability.h"
-#include "cgroup-util.h"
 
 _public_ int sd_bus_get_unique_name(sd_bus *bus, const char **unique) {
         int r;
@@ -77,7 +76,7 @@ static int bus_request_name_kernel(sd_bus *bus, const char *name, uint64_t flags
         if (r < 0)
                 return -errno;
 
-        if (n->flags & KDBUS_NAME_IN_QUEUE)
+        if (n->return_flags & KDBUS_NAME_IN_QUEUE)
                 return 0;
 
         return 1;
@@ -584,15 +583,16 @@ static int bus_populate_creds_from_items(
 
                 case KDBUS_ITEM_AUXGROUPS:
                         if (mask & SD_BUS_CREDS_SUPPLEMENTARY_GIDS) {
-                                size_t n;
+                                size_t i, n;
                                 uid_t *g;
 
-                                assert_cc(sizeof(gid_t) == sizeof(uint32_t));
-
-                                n = (item->size - offsetof(struct kdbus_item, data32)) / sizeof(uint32_t);
-                                g = newdup(gid_t, item->data32, n);
+                                n = (item->size - offsetof(struct kdbus_item, data64)) / sizeof(uint64_t);
+                                g = new(gid_t, n);
                                 if (!g)
                                         return -ENOMEM;
+
+                                for (i = 0; i < n; i++)
+                                        g[i] = item->data64[i];
 
                                 free(c->supplementary_gids);
                                 c->supplementary_gids = g;
@@ -622,7 +622,7 @@ int bus_get_name_creds_kdbus(
         int r;
 
         if (streq(name, "org.freedesktop.DBus"))
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         r = bus_kernel_parse_unique_name(name, &id);
         if (r < 0)
@@ -654,7 +654,7 @@ int bus_get_name_creds_kdbus(
                 mask |= SD_BUS_CREDS_PID;
 
         cmd->size = size;
-        cmd->flags = attach_flags_to_kdbus(mask);
+        cmd->attach_flags = attach_flags_to_kdbus(mask);
 
         r = ioctl(bus->input_fd, KDBUS_CMD_CONN_INFO, cmd);
         if (r < 0)
@@ -875,7 +875,7 @@ _public_ int sd_bus_get_name_creds(
 
         assert_return(bus, -EINVAL);
         assert_return(name, -EINVAL);
-        assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -ENOTSUP);
+        assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -EOPNOTSUPP);
         assert_return(mask == 0 || creds, -EINVAL);
         assert_return(!bus_pid_changed(bus), -ECHILD);
         assert_return(service_name_is_valid(name), -EINVAL);
@@ -919,7 +919,7 @@ static int bus_get_owner_creds_kdbus(sd_bus *bus, uint64_t mask, sd_bus_creds **
                      SD_BUS_CREDS_AUDIT_SESSION_ID|SD_BUS_CREDS_AUDIT_LOGIN_UID)))
                 mask |= SD_BUS_CREDS_PID;
 
-        cmd.flags = attach_flags_to_kdbus(mask);
+        cmd.attach_flags = attach_flags_to_kdbus(mask);
 
         r = ioctl(bus->input_fd, KDBUS_CMD_BUS_CREATOR_INFO, &cmd);
         if (r < 0)
@@ -989,7 +989,7 @@ static int bus_get_owner_creds_dbus1(sd_bus *bus, uint64_t mask, sd_bus_creds **
 
 _public_ int sd_bus_get_owner_creds(sd_bus *bus, uint64_t mask, sd_bus_creds **ret) {
         assert_return(bus, -EINVAL);
-        assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -ENOTSUP);
+        assert_return((mask & ~SD_BUS_CREDS_AUGMENT) <= _SD_BUS_CREDS_ALL, -EOPNOTSUPP);
         assert_return(ret, -EINVAL);
         assert_return(!bus_pid_changed(bus), -ECHILD);
 

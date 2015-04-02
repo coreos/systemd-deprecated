@@ -20,9 +20,7 @@
 ***/
 
 #include <time.h>
-#include <assert.h>
 #include <errno.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <string.h>
 #include <fcntl.h>
@@ -32,7 +30,6 @@
 #include "util.h"
 #include "utf8.h"
 #include "hashmap.h"
-#include "fileio.h"
 #include "journal-internal.h"
 
 /* up to three lines (each up to 100 characters),
@@ -1166,9 +1163,9 @@ static int get_boot_id_for_machine(const char *machine, sd_id128_t *boot_id) {
                 if (fd < 0)
                         _exit(EXIT_FAILURE);
 
-                k = loop_read(fd, buf, 36, false);
+                r = loop_read_exact(fd, buf, 36, false);
                 safe_close(fd);
-                if (k != 36)
+                if (r < 0)
                         _exit(EXIT_FAILURE);
 
                 k = send(pair[1], buf, 36, MSG_NOSIGNAL);

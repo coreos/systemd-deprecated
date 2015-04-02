@@ -84,6 +84,13 @@ typedef enum LinkOperationalState {
         _LINK_OPERSTATE_INVALID = -1
 } LinkOperationalState;
 
+typedef enum DCHPClientIdentifier {
+        DHCP_CLIENT_ID_MAC,
+        DHCP_CLIENT_ID_DUID,
+        _DHCP_CLIENT_ID_MAX,
+        _DHCP_CLIENT_ID_INVALID = -1,
+} DCHPClientIdentifier;
+
 struct FdbEntry {
         Network *network;
         unsigned section;
@@ -116,6 +123,7 @@ struct Network {
         NetDev *bond;
         Hashmap *stacked_netdevs;
         AddressFamilyBoolean dhcp;
+        DCHPClientIdentifier dhcp_client_identifier;
         char *dhcp_vendor_class_identifier;
         bool dhcp_dns;
         bool dhcp_ntp;
@@ -152,7 +160,7 @@ struct Network {
         Hashmap *fdb_entries_by_section;
 
         bool wildcard_domain;
-        char **domains, **dns, **ntp;
+        char **domains, **dns, **ntp, **bind_carrier;
 
         LLMNRSupport llmnr;
 
@@ -404,6 +412,9 @@ int config_parse_fdb_vlan_id(const char *unit, const char *filename, unsigned li
 int config_parse_dhcp(const char *unit, const char *filename, unsigned line,
                       const char *section, unsigned section_line, const char *lvalue,
                       int ltype, const char *rvalue, void *data, void *userdata);
+int config_parse_dhcp_client_identifier(const char *unit, const char *filename, unsigned line,
+                                        const char *section, unsigned section_line, const char *lvalue,
+                                        int ltype, const char *rvalue, void *data, void *userdata);
 
 /* IPv4LL support (legacy) */
 

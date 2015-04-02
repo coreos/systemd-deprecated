@@ -38,7 +38,6 @@
 #include "strv.h"
 #include "memfd-util.h"
 #include "capability.h"
-#include "cgroup-util.h"
 #include "fileio.h"
 
 #include "bus-internal.h"
@@ -749,10 +748,21 @@ static int bus_kernel_make_message(sd_bus *bus, struct kdbus_msg *k) {
                 case KDBUS_ITEM_AUXGROUPS:
 
                         if (bus->creds_mask & SD_BUS_CREDS_SUPPLEMENTARY_GIDS) {
-                                assert_cc(sizeof(gid_t) == sizeof(uint32_t));
+                                size_t i, n;
+                                gid_t *g;
 
-                                m->creds.n_supplementary_gids = (d->size - offsetof(struct kdbus_item, data32)) / sizeof(uint32_t);
-                                m->creds.supplementary_gids = (gid_t*) d->data32;
+                                n = (d->size - offsetof(struct kdbus_item, data64)) / sizeof(uint64_t);
+                                g = new(gid_t, n);
+                                if (!g) {
+                                        r = -ENOMEM;
+                                        goto fail;
+                                }
+
+                                for (i = 0; i < n; i++)
+                                        g[i] = d->data64[i];
+
+                                m->creds.supplementary_gids = g;
+                                m->creds.n_supplementary_gids = n;
                                 m->creds.mask |= SD_BUS_CREDS_SUPPLEMENTARY_GIDS;
                         }
 
@@ -841,9 +851,8 @@ fail:
 
 int bus_kernel_take_fd(sd_bus *b) {
         struct kdbus_bloom_parameter *bloom = NULL;
+        struct kdbus_item *items, *item;
         struct kdbus_cmd_hello *hello;
-        struct kdbus_item_list *items;
-        struct kdbus_item *item;
         _cleanup_free_ char *g = NULL;
         const char *name;
         size_t l = 0, m = 0, sz;
@@ -963,13 +972,13 @@ int bus_kernel_take_fd(sd_bus *b) {
         /* The higher 32bit of the bus_flags fields are considered
          * 'incompatible flags'. Refuse them all for now. */
         if (hello->bus_flags > 0xFFFFFFFFULL) {
-                r = -ENOTSUP;
+                r = -EOPNOTSUPP;
                 goto fail;
         }
 
         /* extract bloom parameters from items */
         items = (void*)((uint8_t*)b->kdbus_buffer + hello->offset);
-        KDBUS_ITEM_FOREACH(item, items, items) {
+        KDBUS_FOREACH(item, items, hello->items_size) {
                 switch (item->type) {
                 case KDBUS_ITEM_BLOOM_PARAMETER:
                         bloom = &item->bloom_parameter;
@@ -978,7 +987,7 @@ int bus_kernel_take_fd(sd_bus *b) {
         }
 
         if (!bloom || !bloom_validate_parameters((size_t) bloom->size, (unsigned) bloom->n_hash)) {
-                r = -ENOTSUP;
+                r = -EOPNOTSUPP;
                 goto fail;
         }
 
@@ -1345,14 +1354,11 @@ int bus_kernel_read_message(sd_bus *bus, bool hint_priority, int64_t priority) {
         }
 
         r = ioctl(bus->input_fd, KDBUS_CMD_RECV, &recv);
+        if (recv.return_flags & KDBUS_RECV_RETURN_DROPPED_MSGS)
+                log_debug("%s: kdbus reports %" PRIu64 " dropped broadcast messages, ignoring.", strna(bus->description), (uint64_t) recv.dropped_msgs);
         if (r < 0) {
                 if (errno == EAGAIN)
                         return 0;
-
-                if (errno == EOVERFLOW) {
-                        log_debug("%s: kdbus reports %" PRIu64 " dropped broadcast messages, ignoring.", strna(bus->description), (uint64_t) recv.dropped_msgs);
-                        return 0;
-                }
 
                 return -errno;
         }
@@ -1389,7 +1395,7 @@ int bus_kernel_pop_memfd(sd_bus *bus, void **address, size_t *mapped, size_t *al
         assert(allocated);
 
         if (!bus || !bus->is_kernel)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         assert_se(pthread_mutex_lock(&bus->memfd_cache_mutex) >= 0);
 

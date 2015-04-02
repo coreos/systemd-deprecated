@@ -24,13 +24,10 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
-#include <linux/vt.h>
-#include <sys/timerfd.h>
 
 #include "sd-daemon.h"
 #include "strv.h"
 #include "conf-parser.h"
-#include "mkdir.h"
 #include "bus-util.h"
 #include "bus-error.h"
 #include "logind.h"
@@ -57,6 +54,7 @@ Manager *manager_new(void) {
         m->handle_lid_switch = HANDLE_SUSPEND;
         m->handle_lid_switch_docked = HANDLE_IGNORE;
         m->lid_switch_ignore_inhibited = true;
+        m->holdoff_timeout_usec = 30 * USEC_PER_SEC;
 
         m->idle_action_usec = 30 * USEC_PER_MINUTE;
         m->idle_action = HANDLE_IGNORE;
@@ -1032,7 +1030,7 @@ int manager_startup(Manager *m) {
         if (r < 0)
                 return log_error_errno(r, "Failed to add seat0: %m");
 
-        r = manager_set_lid_switch_ignore(m, 0 + IGNORE_LID_SWITCH_STARTUP_USEC);
+        r = manager_set_lid_switch_ignore(m, 0 + m->holdoff_timeout_usec);
         if (r < 0)
                 log_warning_errno(r, "Failed to set up lid switch ignore event source: %m");
 

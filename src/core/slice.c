@@ -20,12 +20,9 @@
 ***/
 
 #include <errno.h>
-#include <signal.h>
-#include <unistd.h>
 
 #include "unit.h"
 #include "slice.h"
-#include "load-fragment.h"
 #include "log.h"
 #include "dbus-slice.h"
 #include "special.h"
@@ -153,7 +150,7 @@ static int slice_load(Unit *u) {
         return slice_verify(s);
 }
 
-static int slice_coldplug(Unit *u) {
+static int slice_coldplug(Unit *u, Hashmap *deferred_work) {
         Slice *t = SLICE(u);
 
         assert(t);
@@ -184,7 +181,8 @@ static int slice_start(Unit *u) {
         assert(t);
         assert(t->state == SLICE_DEAD);
 
-        unit_realize_cgroup(u);
+        (void) unit_realize_cgroup(u);
+        (void) unit_reset_cpu_usage(u);
 
         slice_set_state(t, SLICE_ACTIVE);
         return 1;

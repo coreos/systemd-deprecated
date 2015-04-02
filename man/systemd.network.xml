@@ -280,13 +280,24 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>BindCarrier=</varname></term>
+          <listitem>
+            <para>A port or a list of ports. When set, controls the
+            behaviour of the current interface. When all ports in the list
+            are in an operational down state, the current interface is brought
+            down. When at least one port has carrier, the current interface
+            is brought up.
+            </para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>Address=</varname></term>
           <listitem>
             <para>A static IPv4 or IPv6 address and its prefix length,
             separated by a <literal>/</literal> character. Specify
             this key more than once to configure several addresses.
             The format of the address must be as described in
-            <citerefentry><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
+            <citerefentry project='man-pages'><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
             This is a short-hand for an [Address] section only
             containing an Address key (see below). This option may be
             specified more than once.
@@ -312,7 +323,7 @@
           <listitem>
             <para>The gateway address, which must be in the format
             described in
-            <citerefentry><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
+            <citerefentry project='man-pages'><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
             This is a short-hand for a [Route] section only containing
             a Gateway key. This option may be specified more than
             once.</para>
@@ -323,7 +334,7 @@
           <listitem>
             <para>A DNS server address, which must be in the format
             described in
-            <citerefentry><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
+            <citerefentry project='man-pages'><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
             This option may be specified more than once.</para>
           </listitem>
         </varlistentry>
@@ -429,7 +440,7 @@
           <listitem>
             <para>The broadcast address, which must be in the format
             described in
-            <citerefentry><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
+            <citerefentry project='man-pages'><refentrytitle>inet_pton</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
             This key only applies to IPv4 addresses. If it is not
             given, it is derived from the <literal>Address</literal>
             key.</para>
@@ -561,6 +572,14 @@
           </listitem>
         </varlistentry>
         <varlistentry>
+          <term><varname>ClientIdentifier=</varname></term>
+          <listitem>
+            <para>DHCP client identifier to use. Either <literal>mac</literal>
+            to use the MAC address of the link or <literal>duid</literal>
+            (the default) to use a RFC4361-compliant Client ID.</para>
+          </listitem>
+        </varlistentry>
+        <varlistentry>
           <term><varname>VendorClassIdentifier=</varname></term>
           <listitem>
             <para>The vendor class identifier used to identify vendor
@@ -651,7 +670,7 @@ Gateway=192.168.0.1</programlisting>
 Name=en*
 
 [Network]
-DHCP=both</programlisting>
+DHCP=yes</programlisting>
     </example>
 
     <example>

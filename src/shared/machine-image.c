@@ -23,7 +23,6 @@
 #include <linux/fs.h>
 #include <fcntl.h>
 
-#include "strv.h"
 #include "utf8.h"
 #include "btrfs-util.h"
 #include "path-util.h"
@@ -164,10 +163,10 @@ static int image_make(
 
                                 r = btrfs_subvol_get_quota_fd(fd, &quota);
                                 if (r >= 0) {
-                                        (*ret)->usage = quota.referred;
+                                        (*ret)->usage = quota.referenced;
                                         (*ret)->usage_exclusive = quota.exclusive;
 
-                                        (*ret)->limit = quota.referred_max;
+                                        (*ret)->limit = quota.referenced_max;
                                         (*ret)->limit_exclusive = quota.exclusive_max;
                                 }
 
@@ -370,7 +369,7 @@ int image_remove(Image *i) {
                 return rm_rf_dangerous(i->path, false, true, false);
 
         default:
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 }
 
@@ -431,7 +430,7 @@ int image_rename(Image *i, const char *new_name) {
         }
 
         default:
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 
         if (!new_path)
@@ -441,8 +440,9 @@ int image_rename(Image *i, const char *new_name) {
         if (!nn)
                 return -ENOMEM;
 
-        if (renameat2(AT_FDCWD, i->path, AT_FDCWD, new_path, RENAME_NOREPLACE) < 0)
-                return -errno;
+        r = rename_noreplace(AT_FDCWD, i->path, AT_FDCWD, new_path);
+        if (r < 0)
+                return r;
 
         /* Restore the immutable bit, if it was set before */
         if (file_attr & FS_IMMUTABLE_FL)
@@ -498,7 +498,7 @@ int image_clone(Image *i, const char *new_name, bool read_only) {
                 break;
 
         default:
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 
         if (r < 0)
@@ -563,7 +563,7 @@ int image_read_only(Image *i, bool b) {
         }
 
         default:
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 
         return 0;
@@ -612,6 +612,19 @@ int image_path_lock(const char *path, int operation, LockFile *global, LockFile 
 
         *local = t;
         return 0;
+}
+
+int image_set_limit(Image *i, uint64_t referenced_max) {
+        assert(i);
+
+        if (path_equal(i->path, "/") ||
+            path_startswith(i->path, "/usr"))
+                return -EROFS;
+
+        if (i->type != IMAGE_SUBVOLUME)
+                return -EOPNOTSUPP;
+
+        return btrfs_quota_limit(i->path, referenced_max);
 }
 
 int image_name_lock(const char *name, int operation, LockFile *ret) {

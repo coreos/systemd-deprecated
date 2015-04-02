@@ -20,7 +20,6 @@
 ***/
 
 #include <netinet/in.h>
-#include <netinet/ether.h>
 #include <stdbool.h>
 #include <unistd.h>
 
@@ -649,13 +648,13 @@ int sd_rtnl_message_get_family(sd_rtnl_message *m, int *family) {
                 return 0;
         }
 
-        return -ENOTSUP;
+        return -EOPNOTSUPP;
 }
 
 int sd_rtnl_message_is_broadcast(sd_rtnl_message *m) {
         assert_return(m, -EINVAL);
 
-        return !m->hdr->nlmsg_pid;
+        return m->broadcast;
 }
 
 int sd_rtnl_message_link_get_ifindex(sd_rtnl_message *m, int *ifindex) {
@@ -1475,7 +1474,7 @@ static int socket_recv_message(int fd, struct iovec *iov, uint32_t *_group, bool
                 return 0;
         }
 
-        if (group)
+        if (_group)
                 *_group = group;
 
         return r;
@@ -1501,7 +1500,7 @@ int socket_read_message(sd_rtnl *rtnl) {
         assert(rtnl->rbuffer_allocated >= sizeof(struct nlmsghdr));
 
         /* read nothing, just get the pending message size */
-        r = socket_recv_message(rtnl->fd, &iov, &group, true);
+        r = socket_recv_message(rtnl->fd, &iov, NULL, true);
         if (r <= 0)
                 return r;
         else
@@ -1555,13 +1554,15 @@ int socket_read_message(sd_rtnl *rtnl) {
                         /* finished reading multi-part message */
                         done = true;
 
-                        continue;
+                        /* if first is not defined, put NLMSG_DONE into the receive queue. */
+                        if (first)
+                                continue;
                 }
 
                 /* check that we support this message type */
                 r = type_system_get_type(NULL, &nl_type, new_msg->nlmsg_type);
                 if (r < 0) {
-                        if (r == -ENOTSUP)
+                        if (r == -EOPNOTSUPP)
                                 log_debug("sd-rtnl: ignored message with unknown type: %i",
                                           new_msg->nlmsg_type);
 
@@ -1577,6 +1578,8 @@ int socket_read_message(sd_rtnl *rtnl) {
                 r = message_new_empty(rtnl, &m);
                 if (r < 0)
                         return r;
+
+                m->broadcast = !!group;
 
                 m->hdr = memdup(new_msg, new_msg->nlmsg_len);
                 if (!m->hdr)

@@ -23,27 +23,21 @@
 #include <sched.h>
 #include <unistd.h>
 #include <sys/types.h>
-#include <sys/syscall.h>
 #include <sys/mount.h>
-#include <sys/wait.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 #include <sys/prctl.h>
 #include <getopt.h>
-#include <termios.h>
-#include <sys/signalfd.h>
 #include <grp.h>
 #include <linux/fs.h>
-#include <sys/un.h>
 #include <sys/socket.h>
 #include <linux/netlink.h>
 #include <net/if.h>
 #include <linux/veth.h>
 #include <sys/personality.h>
 #include <linux/loop.h>
-#include <poll.h>
 #include <sys/file.h>
 
 #ifdef HAVE_SELINUX
@@ -66,7 +60,6 @@
 #include "util.h"
 #include "mkdir.h"
 #include "macro.h"
-#include "audit.h"
 #include "missing.h"
 #include "cgroup-util.h"
 #include "strv.h"
@@ -79,9 +72,7 @@
 #include "bus-util.h"
 #include "bus-error.h"
 #include "ptyfwd.h"
-#include "bus-kernel.h"
 #include "env-util.h"
-#include "def.h"
 #include "rtnl-util.h"
 #include "udev-util.h"
 #include "blkid-util.h"
@@ -187,6 +178,10 @@ static unsigned long arg_personality = 0xffffffffLU;
 static char *arg_image = NULL;
 static Volatile arg_volatile = VOLATILE_NO;
 static ExposePort *arg_expose_ports = NULL;
+static char **arg_property = NULL;
+static uid_t arg_uid_shift = UID_INVALID, arg_uid_range = 0x10000U;
+static bool arg_userns = false;
+static int arg_kill_signal = 0;
 
 static void help(void) {
         printf("%s [OPTIONS...] [PATH] [ARGUMENTS...]\n\n"
@@ -205,6 +200,7 @@ static void help(void) {
                "  -M --machine=NAME         Set the machine name for the container\n"
                "     --uuid=UUID            Set a specific machine UUID for the container\n"
                "  -S --slice=SLICE          Place the container in the specified slice\n"
+               "     --property=NAME=VALUE  Set scope unit property\n"
                "     --private-network      Disable network in container\n"
                "     --network-interface=INTERFACE\n"
                "                            Assign an existing network interface to the\n"
@@ -221,6 +217,8 @@ static void help(void) {
                "                            Add a virtual ethernet connection between host\n"
                "                            and container and add it to an existing bridge on\n"
                "                            the host\n"
+               "     --private-users[=UIDBASE[:NUIDS]]\n"
+               "                            Run within user namespace\n"
                "  -p --port=[PROTOCOL:]HOSTPORT[:CONTAINERPORT]\n"
                "                            Expose a container IP port on the host\n"
                "  -Z --selinux-context=SECLABEL\n"
@@ -232,6 +230,7 @@ static void help(void) {
                "     --capability=CAP       In addition to the default, retain specified\n"
                "                            capability\n"
                "     --drop-capability=CAP  Drop the specified capability from the default set\n"
+               "     --kill-signal=SIGNAL   Select signal to use for shutting down PID 1\n"
                "     --link-journal=MODE    Link up guest journal, one of no, auto, guest, host,\n"
                "                            try-guest, try-host\n"
                "  -j                        Equivalent to --link-journal=try-guest\n"
@@ -294,6 +293,9 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_PERSONALITY,
                 ARG_VOLATILE,
                 ARG_TEMPLATE,
+                ARG_PROPERTY,
+                ARG_PRIVATE_USERS,
+                ARG_KILL_SIGNAL,
         };
 
         static const struct option options[] = {
@@ -331,6 +333,9 @@ static int parse_argv(int argc, char *argv[]) {
                 { "image",                 required_argument, NULL, 'i'                   },
                 { "volatile",              optional_argument, NULL, ARG_VOLATILE          },
                 { "port",                  required_argument, NULL, 'p'                   },
+                { "property",              required_argument, NULL, ARG_PROPERTY          },
+                { "private-users",         optional_argument, NULL, ARG_PRIVATE_USERS     },
+                { "kill-signal",           required_argument, NULL, ARG_KILL_SIGNAL       },
                 {}
         };
 
@@ -731,6 +736,50 @@ static int parse_argv(int argc, char *argv[]) {
                         break;
                 }
 
+                case ARG_PROPERTY:
+                        if (strv_extend(&arg_property, optarg) < 0)
+                                return log_oom();
+
+                        break;
+
+                case ARG_PRIVATE_USERS:
+                        if (optarg) {
+                                _cleanup_free_ char *buffer = NULL;
+                                const char *range, *shift;
+
+                                range = strchr(optarg, ':');
+                                if (range) {
+                                        buffer = strndup(optarg, range - optarg);
+                                        if (!buffer)
+                                                return log_oom();
+                                        shift = buffer;
+
+                                        range++;
+                                        if (safe_atou32(range, &arg_uid_range) < 0 || arg_uid_range <= 0) {
+                                                log_error("Failed to parse UID range: %s", range);
+                                                return -EINVAL;
+                                        }
+                                } else
+                                        shift = optarg;
+
+                                if (parse_uid(shift, &arg_uid_shift) < 0) {
+                                        log_error("Failed to parse UID: %s", optarg);
+                                        return -EINVAL;
+                                }
+                        }
+
+                        arg_userns = true;
+                        break;
+
+                case ARG_KILL_SIGNAL:
+                        arg_kill_signal = signal_from_string_try_harder(optarg);
+                        if (arg_kill_signal < 0) {
+                                log_error("Cannot parse signal: %s", optarg);
+                                return -EINVAL;
+                        }
+
+                        break;
+
                 case '?':
                         return -EINVAL;
 
@@ -793,6 +842,9 @@ static int parse_argv(int argc, char *argv[]) {
 
         arg_retain = (arg_retain | plus | (arg_private_network ? 1ULL << CAP_NET_ADMIN : 0)) & ~minus;
 
+        if (arg_boot && arg_kill_signal <= 0)
+                arg_kill_signal = SIGRTMIN+3;
+
         return 1;
 }
 
@@ -827,10 +879,7 @@ static int mount_all(const char *dest) {
         int r = 0;
 
         for (k = 0; k < ELEMENTSOF(mount_table); k++) {
-                _cleanup_free_ char *where = NULL;
-#ifdef HAVE_SELINUX
-                _cleanup_free_ char *options = NULL;
-#endif
+                _cleanup_free_ char *where = NULL, *options = NULL;
                 const char *o;
                 int t;
 
@@ -877,6 +926,19 @@ static int mount_all(const char *dest) {
 #endif
                         o = mount_table[k].options;
 
+                if (arg_userns && arg_uid_shift != UID_INVALID && streq_ptr(mount_table[k].type, "tmpfs")) {
+                        char *uid_options = NULL;
+
+                        if (o)
+                                asprintf(&uid_options, "%s,uid=" UID_FMT ",gid=" UID_FMT, o, arg_uid_shift, arg_uid_shift);
+                        else
+                                asprintf(&uid_options, "uid=" UID_FMT ",gid=" UID_FMT, arg_uid_shift, arg_uid_shift);
+                        if (!uid_options)
+                                return log_oom();
+
+                        free(options);
+                        o = options = uid_options;
+                }
 
                 if (mount(mount_table[k].what,
                           where,
@@ -1389,6 +1451,10 @@ static int copy_devnodes(const char *dest) {
 
                         if (mknod(to, st.st_mode, st.st_rdev) < 0)
                                 return log_error_errno(errno, "mknod(%s) failed: %m", to);
+
+                        if (arg_userns && arg_uid_shift != UID_INVALID)
+                                if (lchown(to, arg_uid_shift, arg_uid_shift) < 0)
+                                        return log_error_errno(errno, "chown() of device node %s failed: %m", to);
                 }
         }
 
@@ -1404,6 +1470,10 @@ static int setup_ptmx(const char *dest) {
 
         if (symlink("pts/ptmx", p) < 0)
                 return log_error_errno(errno, "Failed to create /dev/ptmx symlink: %m");
+
+        if (arg_userns && arg_uid_shift != UID_INVALID)
+                if (lchown(p, arg_uid_shift, arg_uid_shift) < 0)
+                        return log_error_errno(errno, "lchown() of symlink %s failed: %m", p);
 
         return 0;
 }
@@ -1897,6 +1967,7 @@ static int register_machine(pid_t pid, int local_ifindex) {
                                 local_ifindex > 0 ? 1 : 0, local_ifindex);
         } else {
                 _cleanup_bus_message_unref_ sd_bus_message *m = NULL;
+                char **i;
 
                 r = sd_bus_message_new_method_call(
                                 bus,
@@ -1906,7 +1977,7 @@ static int register_machine(pid_t pid, int local_ifindex) {
                                 "org.freedesktop.machine1.Manager",
                                 "CreateMachineWithNetwork");
                 if (r < 0)
-                        return log_error_errno(r, "Failed to create message: %m");
+                        return bus_log_create_error(r);
 
                 r = sd_bus_message_append(
                                 m,
@@ -1919,21 +1990,21 @@ static int register_machine(pid_t pid, int local_ifindex) {
                                 strempty(arg_directory),
                                 local_ifindex > 0 ? 1 : 0, local_ifindex);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to append message arguments: %m");
+                        return bus_log_create_error(r);
 
                 r = sd_bus_message_open_container(m, 'a', "(sv)");
                 if (r < 0)
-                        return log_error_errno(r, "Failed to open container: %m");
+                        return bus_log_create_error(r);
 
                 if (!isempty(arg_slice)) {
                         r = sd_bus_message_append(m, "(sv)", "Slice", "s", arg_slice);
                         if (r < 0)
-                                return log_error_errno(r, "Failed to append slice: %m");
+                                return bus_log_create_error(r);
                 }
 
                 r = sd_bus_message_append(m, "(sv)", "DevicePolicy", "s", "strict");
                 if (r < 0)
-                        return log_error_errno(r, "Failed to add device policy: %m");
+                        return bus_log_create_error(r);
 
                 r = sd_bus_message_append(m, "(sv)", "DeviceAllow", "a(ss)", 9,
                                           /* Allow the container to
@@ -1959,9 +2030,23 @@ static int register_machine(pid_t pid, int local_ifindex) {
                 if (r < 0)
                         return log_error_errno(r, "Failed to add device whitelist: %m");
 
+                STRV_FOREACH(i, arg_property) {
+                        r = sd_bus_message_open_container(m, 'r', "sv");
+                        if (r < 0)
+                                return bus_log_create_error(r);
+
+                        r = bus_append_unit_property_assignment(m, *i);
+                        if (r < 0)
+                                return r;
+
+                        r = sd_bus_message_close_container(m);
+                        if (r < 0)
+                                return bus_log_create_error(r);
+                }
+
                 r = sd_bus_message_close_container(m);
                 if (r < 0)
-                        return log_error_errno(r, "Failed to close container: %m");
+                        return bus_log_create_error(r);
 
                 r = sd_bus_call(bus, m, 0, &error, NULL);
         }
@@ -2666,7 +2751,7 @@ static int setup_image(char **device_path, int *loop_nr) {
 
 #define PARTITION_TABLE_BLURB \
         "Note that the disk image needs to either contain only a single MBR partition of\n" \
-        "type 0x83 that is marked bootable, or a sinlge GPT partition of type" \
+        "type 0x83 that is marked bootable, or a single GPT partition of type " \
         "0FC63DAF-8483-4772-8E79-3D69D8477DE4 or follow\n" \
         "    http://www.freedesktop.org/wiki/Specifications/DiscoverablePartitionsSpec/\n" \
         "to be bootable with systemd-nspawn."
@@ -2738,7 +2823,7 @@ static int dissect_image(
                 return -errno;
         }
 
-        blkid_probe_lookup_value(b, "PTTYPE", &pttype, NULL);
+        (void) blkid_probe_lookup_value(b, "PTTYPE", &pttype, NULL);
 
         is_gpt = streq_ptr(pttype, "gpt");
         is_mbr = streq_ptr(pttype, "dos");
@@ -3040,7 +3125,7 @@ static int dissect_image(
         return 0;
 #else
         log_error("--image= is not supported, compiled without blkid support.");
-        return -ENOTSUP;
+        return -EOPNOTSUPP;
 #endif
 }
 
@@ -3095,7 +3180,7 @@ static int mount_device(const char *what, const char *where, const char *directo
 
         if (streq(fstype, "crypto_LUKS")) {
                 log_error("nspawn currently does not support LUKS disk images.");
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
         }
 
         if (mount(what, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), NULL) < 0)
@@ -3104,7 +3189,7 @@ static int mount_device(const char *what, const char *where, const char *directo
         return 0;
 #else
         log_error("--image= is not supported, compiled without blkid support.");
-        return -ENOTSUP;
+        return -EOPNOTSUPP;
 #endif
 }
 
@@ -3480,7 +3565,7 @@ static int on_orderly_shutdown(sd_event_source *s, const struct signalfd_siginfo
 
         pid = PTR_TO_UINT32(userdata);
         if (pid > 0) {
-                if (kill(pid, SIGRTMIN+3) >= 0) {
+                if (kill(pid, arg_kill_signal) >= 0) {
                         log_info("Trying to halt container. Send SIGTERM again to trigger immediate termination.");
                         sd_event_source_set_userdata(s, NULL);
                         return 0;
@@ -3557,6 +3642,38 @@ static int determine_names(void) {
         return 0;
 }
 
+static int determine_uid_shift(void) {
+        int r;
+
+        if (!arg_userns)
+                return 0;
+
+        if (arg_uid_shift == UID_INVALID) {
+                struct stat st;
+
+                r = stat(arg_directory, &st);
+                if (r < 0)
+                        return log_error_errno(errno, "Failed to determine UID base of %s: %m", arg_directory);
+
+                arg_uid_shift = st.st_uid & UINT32_C(0xffff0000);
+
+                if (arg_uid_shift != (st.st_gid & UINT32_C(0xffff0000))) {
+                        log_error("UID and GID base of %s don't match.", arg_directory);
+                        return -EINVAL;
+                }
+
+                arg_uid_range = UINT32_C(0x10000);
+        }
+
+        if (arg_uid_shift > (uid_t) -1 - arg_uid_range) {
+                log_error("UID base too high for UID range.");
+                return -EINVAL;
+        }
+
+        log_info("Using user namespaces with base " UID_FMT " and range " UID_FMT ".", arg_uid_shift, arg_uid_range);
+        return 0;
+}
+
 int main(int argc, char *argv[]) {
 
         _cleanup_free_ char *device_path = NULL, *root_device = NULL, *home_device = NULL, *srv_device = NULL, *console = NULL;
@@ -3571,6 +3688,7 @@ int main(int argc, char *argv[]) {
         int ret = EXIT_SUCCESS;
         union in_addr_union exposed = {};
         _cleanup_release_lock_file_ LockFile tree_global_lock = LOCK_FILE_INIT, tree_local_lock = LOCK_FILE_INIT;
+        bool interactive;
 
         log_parse_environment();
         log_open();
@@ -3617,7 +3735,7 @@ int main(int argc, char *argv[]) {
                 }
 
                 if (arg_ephemeral) {
-                        char *np;
+                        _cleanup_free_ char *np = NULL;
 
                         /* If the specified path is a mount point we
                          * generate the new snapshot immediately
@@ -3647,13 +3765,13 @@ int main(int argc, char *argv[]) {
 
                         r = btrfs_subvol_snapshot(arg_directory, np, arg_read_only, true);
                         if (r < 0) {
-                                free(np);
                                 log_error_errno(r, "Failed to create snapshot %s from %s: %m", np, arg_directory);
                                 goto finish;
                         }
 
                         free(arg_directory);
                         arg_directory = np;
+                        np = NULL;
 
                         remove_subvol = true;
 
@@ -3744,6 +3862,12 @@ int main(int argc, char *argv[]) {
                         goto finish;
         }
 
+        r = determine_uid_shift();
+        if (r < 0)
+                goto finish;
+
+        interactive = isatty(STDIN_FILENO) > 0 && isatty(STDOUT_FILENO) > 0;
+
         master = posix_openpt(O_RDWR|O_NOCTTY|O_CLOEXEC|O_NDELAY);
         if (master < 0) {
                 r = log_error_errno(errno, "Failed to acquire pseudo tty: %m");
@@ -3756,14 +3880,14 @@ int main(int argc, char *argv[]) {
                 goto finish;
         }
 
-        if (!arg_quiet)
-                log_info("Spawning container %s on %s.\nPress ^] three times within 1s to kill container.",
-                         arg_machine, arg_image ?: arg_directory);
-
         if (unlockpt(master) < 0) {
                 r = log_error_errno(errno, "Failed to unlock tty: %m");
                 goto finish;
         }
+
+        if (!arg_quiet)
+                log_info("Spawning container %s on %s.\nPress ^] three times within 1s to kill container.",
+                         arg_machine, arg_image ?: arg_directory);
 
         assert_se(sigemptyset(&mask) == 0);
         sigset_add_many(&mask, SIGCHLD, SIGWINCH, SIGTERM, SIGINT, -1);
@@ -3850,31 +3974,33 @@ int main(int argc, char *argv[]) {
 
                         master = safe_close(master);
 
-                        close_nointr(STDIN_FILENO);
-                        close_nointr(STDOUT_FILENO);
-                        close_nointr(STDERR_FILENO);
-
                         kmsg_socket_pair[0] = safe_close(kmsg_socket_pair[0]);
                         rtnl_socket_pair[0] = safe_close(rtnl_socket_pair[0]);
 
                         reset_all_signal_handlers();
                         reset_signal_mask();
 
-                        r = open_terminal(console, O_RDWR);
-                        if (r != STDIN_FILENO) {
-                                if (r >= 0) {
-                                        safe_close(r);
-                                        r = -EINVAL;
+                        if (interactive) {
+                                close_nointr(STDIN_FILENO);
+                                close_nointr(STDOUT_FILENO);
+                                close_nointr(STDERR_FILENO);
+
+                                r = open_terminal(console, O_RDWR);
+                                if (r != STDIN_FILENO) {
+                                        if (r >= 0) {
+                                                safe_close(r);
+                                                r = -EINVAL;
+                                        }
+
+                                        log_error_errno(r, "Failed to open console: %m");
+                                        _exit(EXIT_FAILURE);
                                 }
 
-                                log_error_errno(r, "Failed to open console: %m");
-                                _exit(EXIT_FAILURE);
-                        }
-
-                        if (dup2(STDIN_FILENO, STDOUT_FILENO) != STDOUT_FILENO ||
-                            dup2(STDIN_FILENO, STDERR_FILENO) != STDERR_FILENO) {
-                                log_error_errno(errno, "Failed to duplicate console: %m");
-                                _exit(EXIT_FAILURE);
+                                if (dup2(STDIN_FILENO, STDOUT_FILENO) != STDOUT_FILENO ||
+                                    dup2(STDIN_FILENO, STDERR_FILENO) != STDERR_FILENO) {
+                                        log_error_errno(errno, "Failed to duplicate console: %m");
+                                        _exit(EXIT_FAILURE);
+                                }
                         }
 
                         if (setsid() < 0) {
@@ -3889,6 +4015,9 @@ int main(int argc, char *argv[]) {
                                 log_error_errno(errno, "PR_SET_PDEATHSIG failed: %m");
                                 _exit(EXIT_FAILURE);
                         }
+
+                        if (arg_private_network)
+                                loopback_setup();
 
                         /* Mark everything as slave, so that we still
                          * receive mounts from the real root, but don't
@@ -3960,7 +4089,7 @@ int main(int argc, char *argv[]) {
                         /* Tell the parent that we are ready, and that
                          * it can cgroupify us to that we lack access
                          * to certain devices and resources. */
-                        (void) barrier_place(&barrier);
+                        (void) barrier_place(&barrier); /* #1 */
 
                         if (setup_boot_id(arg_directory) < 0)
                                 _exit(EXIT_FAILURE);
@@ -3985,7 +4114,7 @@ int main(int argc, char *argv[]) {
 
                         /* Wait until we are cgroup-ified, so that we
                          * can mount the right cgroup path writable */
-                        (void) barrier_sync_next(&barrier);
+                        (void) barrier_place_and_sync(&barrier); /* #2 */
 
                         if (mount_cgroup(arg_directory) < 0)
                                 _exit(EXIT_FAILURE);
@@ -4010,15 +4139,49 @@ int main(int argc, char *argv[]) {
                                 _exit(EXIT_FAILURE);
                         }
 
-                        umask(0022);
+                        if (arg_userns) {
+                                if (unshare(CLONE_NEWUSER) < 0) {
+                                        log_error_errno(errno, "unshare(CLONE_NEWUSER) failed: %m");
+                                        _exit(EXIT_FAILURE);
+                                }
 
-                        if (arg_private_network)
-                                loopback_setup();
+                                /* Tell the parent, that it now can
+                                 * write the UID map. */
+                                (void) barrier_place(&barrier); /* #3 */
+
+                                /* Wait until the parent wrote the UID
+                                 * map */
+                                (void) barrier_place_and_sync(&barrier); /* #4 */
+                        }
+
+                        umask(0022);
 
                         if (drop_capabilities() < 0) {
                                 log_error_errno(errno, "drop_capabilities() failed: %m");
                                 _exit(EXIT_FAILURE);
                         }
+
+                        setup_hostname();
+
+                        if (arg_personality != 0xffffffffLU) {
+                                if (personality(arg_personality) < 0) {
+                                        log_error_errno(errno, "personality() failed: %m");
+                                        _exit(EXIT_FAILURE);
+                                }
+                        } else if (secondary) {
+                                if (personality(PER_LINUX32) < 0) {
+                                        log_error_errno(errno, "personality() failed: %m");
+                                        _exit(EXIT_FAILURE);
+                                }
+                        }
+
+#ifdef HAVE_SELINUX
+                        if (arg_selinux_context)
+                                if (setexeccon((security_context_t) arg_selinux_context) < 0) {
+                                        log_error_errno(errno, "setexeccon(\"%s\") failed: %m", arg_selinux_context);
+                                        _exit(EXIT_FAILURE);
+                                }
+#endif
 
                         r = change_uid_gid(&home);
                         if (r < 0)
@@ -4054,28 +4217,6 @@ int main(int argc, char *argv[]) {
                                 }
                         }
 
-                        setup_hostname();
-
-                        if (arg_personality != 0xffffffffLU) {
-                                if (personality(arg_personality) < 0) {
-                                        log_error_errno(errno, "personality() failed: %m");
-                                        _exit(EXIT_FAILURE);
-                                }
-                        } else if (secondary) {
-                                if (personality(PER_LINUX32) < 0) {
-                                        log_error_errno(errno, "personality() failed: %m");
-                                        _exit(EXIT_FAILURE);
-                                }
-                        }
-
-#ifdef HAVE_SELINUX
-                        if (arg_selinux_context)
-                                if (setexeccon((security_context_t) arg_selinux_context) < 0) {
-                                        log_error_errno(errno, "setexeccon(\"%s\") failed: %m", arg_selinux_context);
-                                        _exit(EXIT_FAILURE);
-                                }
-#endif
-
                         if (!strv_isempty(arg_setenv)) {
                                 char **n;
 
@@ -4089,9 +4230,10 @@ int main(int argc, char *argv[]) {
                         } else
                                 env_use = (char**) envp;
 
-                        /* Wait until the parent is ready with the setup, too... */
-                        if (!barrier_place_and_sync(&barrier))
-                                _exit(EXIT_FAILURE);
+                        /* Let the parent know that we are ready and
+                         * wait until the parent is ready with the
+                         * setup, too... */
+                        (void) barrier_place_and_sync(&barrier); /* #5 */
 
                         if (arg_boot) {
                                 char **a;
@@ -4130,10 +4272,12 @@ int main(int argc, char *argv[]) {
                 kmsg_socket_pair[1] = safe_close(kmsg_socket_pair[1]);
                 rtnl_socket_pair[1] = safe_close(rtnl_socket_pair[1]);
 
+                (void) barrier_place(&barrier); /* #1 */
+
                 /* Wait for the most basic Child-setup to be done,
                  * before we add hardware to it, and place it in a
                  * cgroup. */
-                if (barrier_sync_next(&barrier)) {
+                if (barrier_sync(&barrier)) { /* #1 */
                         int ifi = 0;
 
                         r = move_network_interfaces(pid);
@@ -4160,6 +4304,35 @@ int main(int argc, char *argv[]) {
                         if (r < 0)
                                 goto finish;
 
+                        /* Notify the child that the parent is ready with all
+                         * its setup, and that the child can now hand over
+                         * control to the code to run inside the container. */
+                        (void) barrier_place(&barrier); /* #2 */
+
+                        if (arg_userns) {
+                                char uid_map[strlen("/proc//uid_map") + DECIMAL_STR_MAX(uid_t) + 1], line[DECIMAL_STR_MAX(uid_t)*3+3+1];
+
+                                (void) barrier_place_and_sync(&barrier); /* #3 */
+
+                                xsprintf(uid_map, "/proc/" PID_FMT "/uid_map", pid);
+                                xsprintf(line, UID_FMT " " UID_FMT " " UID_FMT "\n", 0, arg_uid_shift, arg_uid_range);
+                                r = write_string_file(uid_map, line);
+                                if (r < 0) {
+                                        log_error_errno(r, "Failed to write UID map: %m");
+                                        goto finish;
+                                }
+
+                                /* We always assign the same UID and GID ranges */
+                                xsprintf(uid_map, "/proc/" PID_FMT "/gid_map", pid);
+                                r = write_string_file(uid_map, line);
+                                if (r < 0) {
+                                        log_error_errno(r, "Failed to write GID map: %m");
+                                        goto finish;
+                                }
+
+                                (void) barrier_place(&barrier); /* #4 */
+                        }
+
                         /* Block SIGCHLD here, before notifying child.
                          * process_pty() will handle it with the other signals. */
                         r = sigprocmask(SIG_BLOCK, &mask_chld, NULL);
@@ -4171,13 +4344,8 @@ int main(int argc, char *argv[]) {
                         if (r < 0)
                                 goto finish;
 
-                        /* Notify the child that the parent is ready with all
-                         * its setup, and that the child can now hand over
-                         * control to the code to run inside the container. */
-                        (void) barrier_place(&barrier);
-
-                        /* And wait that the child is completely ready now. */
-                        if (barrier_place_and_sync(&barrier)) {
+                        /* Let the child know that we are ready and wait that the child is completely ready now. */
+                        if (barrier_place_and_sync(&barrier)) { /* #5 */
                                 _cleanup_event_unref_ sd_event *event = NULL;
                                 _cleanup_(pty_forward_freep) PTYForward *forward = NULL;
                                 _cleanup_rtnl_unref_ sd_rtnl *rtnl = NULL;
@@ -4194,7 +4362,7 @@ int main(int argc, char *argv[]) {
                                         goto finish;
                                 }
 
-                                if (arg_boot) {
+                                if (arg_kill_signal > 0) {
                                         /* Try to kill the init system on SIGINT or SIGTERM */
                                         sd_event_add_signal(event, NULL, SIGINT, on_orderly_shutdown, UINT32_TO_PTR(pid));
                                         sd_event_add_signal(event, NULL, SIGTERM, on_orderly_shutdown, UINT32_TO_PTR(pid));
@@ -4217,7 +4385,7 @@ int main(int argc, char *argv[]) {
 
                                 rtnl_socket_pair[0] = safe_close(rtnl_socket_pair[0]);
 
-                                r = pty_forward_new(event, master, true, &forward);
+                                r = pty_forward_new(event, master, true, !interactive, &forward);
                                 if (r < 0) {
                                         log_error_errno(r, "Failed to create PTY forwarder: %m");
                                         goto finish;

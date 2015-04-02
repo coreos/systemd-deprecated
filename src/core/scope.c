@@ -20,12 +20,10 @@
 ***/
 
 #include <errno.h>
-#include <signal.h>
 #include <unistd.h>
 
 #include "unit.h"
 #include "scope.h"
-#include "load-fragment.h"
 #include "log.h"
 #include "dbus-scope.h"
 #include "special.h"
@@ -173,7 +171,7 @@ static int scope_load(Unit *u) {
         return scope_verify(s);
 }
 
-static int scope_coldplug(Unit *u) {
+static int scope_coldplug(Unit *u, Hashmap *deferred_work) {
         Scope *s = SCOPE(u);
         int r;
 
@@ -287,6 +285,9 @@ static int scope_start(Unit *u) {
 
         if (!u->transient && UNIT(s)->manager->n_reloading <= 0)
                 return -ENOENT;
+
+        (void) unit_realize_cgroup(u);
+        (void) unit_reset_cpu_usage(u);
 
         r = unit_attach_pids_to_cgroup(u);
         if (r < 0)

@@ -31,10 +31,10 @@
 #include "util.h"
 #include "path-util.h"
 #include "macro.h"
-#include "strv.h"
 #include "copy.h"
 #include "selinux-util.h"
 #include "smack-util.h"
+#include "fileio.h"
 #include "btrfs-ctree.h"
 #include "btrfs-util.h"
 
@@ -101,48 +101,42 @@ int btrfs_is_snapshot(int fd) {
         return F_TYPE_EQUAL(sfs.f_type, BTRFS_SUPER_MAGIC);
 }
 
-int btrfs_subvol_snapshot(const char *old_path, const char *new_path, bool read_only, bool fallback_copy) {
+int btrfs_subvol_snapshot_fd(int old_fd, const char *new_path, bool read_only, bool fallback_copy) {
         struct btrfs_ioctl_vol_args_v2 args = {
                 .flags = read_only ? BTRFS_SUBVOL_RDONLY : 0,
         };
-        _cleanup_close_ int old_fd = -1, new_fd = -1;
+        _cleanup_close_ int new_fd = -1;
         const char *subvolume;
         int r;
 
-        assert(old_path);
-
-        old_fd = open(old_path, O_RDONLY|O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
-        if (old_fd < 0)
-                return -errno;
+        assert(new_path);
 
         r = btrfs_is_snapshot(old_fd);
         if (r < 0)
                 return r;
         if (r == 0) {
+                if (!fallback_copy)
+                        return -EISDIR;
 
-                if (fallback_copy) {
-                        r = btrfs_subvol_make(new_path);
-                        if (r < 0)
-                                return r;
+                r = btrfs_subvol_make(new_path);
+                if (r < 0)
+                        return r;
 
-                        r = copy_directory_fd(old_fd, new_path, true);
+                r = copy_directory_fd(old_fd, new_path, true);
+                if (r < 0) {
+                        btrfs_subvol_remove(new_path);
+                        return r;
+                }
+
+                if (read_only) {
+                        r = btrfs_subvol_set_read_only(new_path, true);
                         if (r < 0) {
                                 btrfs_subvol_remove(new_path);
                                 return r;
                         }
-
-                        if (read_only) {
-                                r = btrfs_subvol_set_read_only(new_path, true);
-                                if (r < 0) {
-                                        btrfs_subvol_remove(new_path);
-                                        return r;
-                                }
-                        }
-
-                        return 0;
                 }
 
-                return -EISDIR;
+                return 0;
         }
 
         r = extract_subvolume_name(new_path, &subvolume);
@@ -160,6 +154,19 @@ int btrfs_subvol_snapshot(const char *old_path, const char *new_path, bool read_
                 return -errno;
 
         return 0;
+}
+
+int btrfs_subvol_snapshot(const char *old_path, const char *new_path, bool read_only, bool fallback_copy) {
+        _cleanup_close_ int old_fd = -1;
+
+        assert(old_path);
+        assert(new_path);
+
+        old_fd = open(old_path, O_RDONLY|O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
+        if (old_fd < 0)
+                return -errno;
+
+        return btrfs_subvol_snapshot_fd(old_fd, new_path, read_only, fallback_copy);
 }
 
 int btrfs_subvol_make(const char *path) {
@@ -309,17 +316,12 @@ int btrfs_clone_range(int infd, uint64_t in_offset, int outfd, uint64_t out_offs
         return 0;
 }
 
-int btrfs_get_block_device(const char *path, dev_t *dev) {
+int btrfs_get_block_device_fd(int fd, dev_t *dev) {
         struct btrfs_ioctl_fs_info_args fsi = {};
-        _cleanup_close_ int fd = -1;
         uint64_t id;
 
-        assert(path);
+        assert(fd >= 0);
         assert(dev);
-
-        fd = open(path, O_RDONLY|O_NOCTTY|O_CLOEXEC|O_DIRECTORY);
-        if (fd < 0)
-                return -errno;
 
         if (ioctl(fd, BTRFS_IOC_FS_INFO, &fsi) < 0)
                 return -errno;
@@ -355,6 +357,19 @@ int btrfs_get_block_device(const char *path, dev_t *dev) {
         }
 
         return -ENODEV;
+}
+
+int btrfs_get_block_device(const char *path, dev_t *dev) {
+        _cleanup_close_ int fd = -1;
+
+        assert(path);
+        assert(dev);
+
+        fd = open(path, O_RDONLY|O_NOCTTY|O_CLOEXEC);
+        if (fd < 0)
+                return -errno;
+
+        return btrfs_get_block_device_fd(fd, dev);
 }
 
 int btrfs_subvol_get_id_fd(int fd, uint64_t *ret) {
@@ -584,7 +599,7 @@ int btrfs_subvol_get_quota_fd(int fd, BtrfsQuotaInfo *ret) {
                         if (sh->type == BTRFS_QGROUP_INFO_KEY) {
                                 const struct btrfs_qgroup_info_item *qii = BTRFS_IOCTL_SEARCH_HEADER_BODY(sh);
 
-                                ret->referred = le64toh(qii->rfer);
+                                ret->referenced = le64toh(qii->rfer);
                                 ret->exclusive = le64toh(qii->excl);
 
                                 found_info = true;
@@ -592,11 +607,11 @@ int btrfs_subvol_get_quota_fd(int fd, BtrfsQuotaInfo *ret) {
                         } else if (sh->type == BTRFS_QGROUP_LIMIT_KEY) {
                                 const struct btrfs_qgroup_limit_item *qli = BTRFS_IOCTL_SEARCH_HEADER_BODY(sh);
 
-                                ret->referred_max = le64toh(qli->max_rfer);
+                                ret->referenced_max = le64toh(qli->max_rfer);
                                 ret->exclusive_max = le64toh(qli->max_excl);
 
-                                if (ret->referred_max == 0)
-                                        ret->referred_max = (uint64_t) -1;
+                                if (ret->referenced_max == 0)
+                                        ret->referenced_max = (uint64_t) -1;
                                 if (ret->exclusive_max == 0)
                                         ret->exclusive_max = (uint64_t) -1;
 
@@ -617,12 +632,12 @@ finish:
                 return -ENODATA;
 
         if (!found_info) {
-                ret->referred = (uint64_t) -1;
+                ret->referenced = (uint64_t) -1;
                 ret->exclusive = (uint64_t) -1;
         }
 
         if (!found_limit) {
-                ret->referred_max = (uint64_t) -1;
+                ret->referenced_max = (uint64_t) -1;
                 ret->exclusive_max = (uint64_t) -1;
         }
 
@@ -646,4 +661,140 @@ int btrfs_defrag(const char *p) {
                 return -errno;
 
         return btrfs_defrag_fd(fd);
+}
+
+int btrfs_quota_enable_fd(int fd, bool b) {
+        struct btrfs_ioctl_quota_ctl_args args = {
+                .cmd = b ? BTRFS_QUOTA_CTL_ENABLE : BTRFS_QUOTA_CTL_DISABLE,
+        };
+
+        assert(fd >= 0);
+
+        if (ioctl(fd, BTRFS_IOC_QUOTA_CTL, &args) < 0)
+                return -errno;
+
+        return 0;
+}
+
+int btrfs_quota_enable(const char *path, bool b) {
+        _cleanup_close_ int fd = -1;
+
+        fd = open(path, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW);
+        if (fd < 0)
+                return -errno;
+
+        return btrfs_quota_enable_fd(fd, b);
+}
+
+int btrfs_quota_limit_fd(int fd, uint64_t referenced_max) {
+        struct btrfs_ioctl_qgroup_limit_args args = {
+                .lim.max_rfer =
+                        referenced_max == (uint64_t) -1 ? 0 :
+                        referenced_max == 0 ? 1 : referenced_max,
+                .lim.flags = BTRFS_QGROUP_LIMIT_MAX_RFER,
+        };
+
+        assert(fd >= 0);
+
+        if (ioctl(fd, BTRFS_IOC_QGROUP_LIMIT, &args) < 0)
+                return -errno;
+
+        return 0;
+}
+
+int btrfs_quota_limit(const char *path, uint64_t referenced_max) {
+        _cleanup_close_ int fd = -1;
+
+        fd = open(path, O_RDONLY|O_CLOEXEC|O_NOCTTY|O_NOFOLLOW);
+        if (fd < 0)
+                return -errno;
+
+        return btrfs_quota_limit_fd(fd, referenced_max);
+}
+
+int btrfs_resize_loopback_fd(int fd, uint64_t new_size, bool grow_only) {
+        struct btrfs_ioctl_vol_args args = {};
+        _cleanup_free_ char *p = NULL, *loop = NULL, *backing = NULL;
+        _cleanup_close_ int loop_fd = -1, backing_fd = -1;
+        struct stat st;
+        dev_t dev;
+        int r;
+
+        /* btrfs cannot handle file systems < 16M, hence use this as minimum */
+        if (new_size < 16*1024*1024)
+                new_size = 16*1024*1024;
+
+        r = btrfs_get_block_device_fd(fd, &dev);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return -ENODEV;
+
+        if (asprintf(&p, "/sys/dev/block/%u:%u/loop/backing_file", major(dev), minor(dev)) < 0)
+                return -ENOMEM;
+        r = read_one_line_file(p, &backing);
+        if (r == -ENOENT)
+                return -ENODEV;
+        if (r < 0)
+                return r;
+        if (isempty(backing) || !path_is_absolute(backing))
+                return -ENODEV;
+
+        backing_fd = open(backing, O_RDWR|O_CLOEXEC|O_NOCTTY);
+        if (backing_fd < 0)
+                return -errno;
+
+        if (fstat(backing_fd, &st) < 0)
+                return -errno;
+        if (!S_ISREG(st.st_mode))
+                return -ENODEV;
+
+        if (new_size == (uint64_t) st.st_size)
+                return 0;
+
+        if (grow_only && new_size < (uint64_t) st.st_size)
+                return -EINVAL;
+
+        if (asprintf(&loop, "/dev/block/%u:%u", major(dev), minor(dev)) < 0)
+                return -ENOMEM;
+        loop_fd = open(loop, O_RDWR|O_CLOEXEC|O_NOCTTY);
+        if (loop_fd < 0)
+                return -errno;
+
+        if (snprintf(args.name, sizeof(args.name), "%" PRIu64, new_size) >= (int) sizeof(args.name))
+                return -EINVAL;
+
+        if (new_size < (uint64_t) st.st_size) {
+                /* Decrease size: first decrease btrfs size, then shorten loopback */
+                if (ioctl(fd, BTRFS_IOC_RESIZE, &args) < 0)
+                        return -errno;
+        }
+
+        if (ftruncate(backing_fd, new_size) < 0)
+                return -errno;
+
+        if (ioctl(loop_fd, LOOP_SET_CAPACITY, 0) < 0)
+                return -errno;
+
+        if (new_size > (uint64_t) st.st_size) {
+                /* Increase size: first enlarge loopback, then increase btrfs size */
+                if (ioctl(fd, BTRFS_IOC_RESIZE, &args) < 0)
+                        return -errno;
+        }
+
+        /* Make sure the free disk space is correctly updated for both file systems */
+        (void) fsync(fd);
+        (void) fsync(backing_fd);
+
+        return 1;
+}
+
+int btrfs_resize_loopback(const char *p, uint64_t new_size, bool grow_only) {
+        _cleanup_close_ int fd = -1;
+
+        fd = open(p, O_RDONLY|O_NOCTTY|O_CLOEXEC);
+        if (fd < 0)
+                return -errno;
+
+        return btrfs_resize_loopback_fd(fd, new_size, grow_only);
 }

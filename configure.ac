@@ -38,19 +38,17 @@ AM_INIT_AUTOMAKE([foreign 1.11 -Wall -Wno-portability silent-rules tar-pax no-di
 AM_SILENT_RULES([yes])
 AC_CANONICAL_HOST
 AC_DEFINE_UNQUOTED([CANONICAL_HOST], "$host", [Canonical host string.])
-AS_IF([test "x$host_cpu" = "xmips" || test "x$host_cpu" = "xmipsel" ||
-       test "x$host_cpu" = "xmips64" || test "x$host_cpu" = "xmips64el"],
-      [AC_DEFINE(ARCH_MIPS, [], [Whether on mips arch])])
-
 LT_PREREQ(2.2)
 LT_INIT([disable-static])
 
 AS_IF([test "x$enable_static" = "xyes"], [AC_MSG_ERROR([--enable-static is not supported by systemd])])
 AS_IF([test "x$enable_largefile" = "xno"], [AC_MSG_ERROR([--disable-largefile is not supported by systemd])])
 
-# i18n stuff for the PolicyKit policy files
+SET_ARCH(X86_64, x86_64*)
+SET_ARCH(IA32, i*86*)
+SET_ARCH(MIPS, mips*)
 
-# Check whether intltool can be found, disable NLS otherwise
+# i18n stuff for the PolicyKit policy files, heck whether intltool can be found, disable NLS otherwise
 AC_CHECK_PROG(intltool_found, [intltool-merge], [yes], [no])
 AS_IF([test x"$intltool_found" != xyes],
       [AS_IF([test x"$enable_nls" = xyes],
@@ -75,6 +73,7 @@ AS_IF([test -z "$INTLTOOL_POLICY_RULE"], [
 
 GETTEXT_PACKAGE=systemd
 AC_SUBST(GETTEXT_PACKAGE)
+AC_DEFINE_UNQUOTED(GETTEXT_PACKAGE, "$GETTEXT_PACKAGE", [systemd])
 
 AC_PROG_MKDIR_P
 AC_PROG_LN_S
@@ -187,6 +186,7 @@ CC_CHECK_FLAGS_APPEND([with_cflags], [CFLAGS], [\
         -Wno-unused-parameter \
         -Wno-missing-field-initializers \
         -Wno-unused-result \
+        -Wno-format-signedness \
         -Werror=overflow \
         -Wdate-time \
         -Wnested-externs \
@@ -208,13 +208,13 @@ AS_CASE([$CC], [*clang*],
                -Wno-gnu-variable-sized-type-not-at-end \
         ])])
 
-AS_CASE([$CFLAGS], [*-O[[12345\ ]]*],
+AS_CASE([$CFLAGS], [*-O[[12345sz\ ]]*],
         [CC_CHECK_FLAGS_APPEND([with_cflags], [CFLAGS], [\
                -flto -ffat-lto-objects])],
         [AC_MSG_RESULT([skipping -flto, optimization not enabled])])
 AC_SUBST([OUR_CFLAGS], "$with_cflags $sanitizer_cflags")
 
-AS_CASE([$CFLAGS], [*-O[[12345\ ]]*],
+AS_CASE([$CFLAGS], [*-O[[12345sz\ ]]*],
         [CC_CHECK_FLAGS_APPEND([with_cppflags], [CPPFLAGS], [\
                -Wp,-D_FORTIFY_SOURCE=2])],
         [AC_MSG_RESULT([skipping -D_FORTIFY_SOURCE, optimization not enabled])])
@@ -333,7 +333,8 @@ AC_CHECK_DECLS([IFLA_INET6_ADDR_GEN_MODE,
                 IFLA_VXLAN_LOCAL6,
                 IFLA_IPTUN_6RD_RELAY_PREFIXLEN,
                 IFLA_BRIDGE_VLAN_INFO,
-                IFLA_BRPORT_UNICAST_FLOOD],
+                IFLA_BRPORT_UNICAST_FLOOD,
+                NDA_IFINDEX],
 [], [], [[
 #include <inttypes.h>
 #include <netinet/in.h>
@@ -344,6 +345,7 @@ AC_CHECK_DECLS([IFLA_INET6_ADDR_GEN_MODE,
 #include <linux/if_tunnel.h>
 #include <linux/if_link.h>
 #include <linux/if_bridge.h>
+#include <linux/neighbour.h>
 ]])
 
 # This makes sure pkg.m4 is available.
@@ -1145,6 +1147,63 @@ fi
 AM_CONDITIONAL(ENABLE_EFI, [test "x$have_efi" = "xyes"])
 
 # ------------------------------------------------------------------------------
+EFI_CC=gcc
+AC_SUBST([EFI_CC])
+
+EFI_ARCH=`echo $host | sed "s/\(-\).*$//"`
+
+AM_COND_IF(ARCH_IA32, [
+        EFI_ARCH=ia32
+        EFI_MACHINE_TYPE_NAME=ia32])
+
+AM_COND_IF(ARCH_X86_64, [
+        EFI_MACHINE_TYPE_NAME=x64])
+
+AC_SUBST([EFI_ARCH])
+AC_SUBST([EFI_MACHINE_TYPE_NAME])
+
+have_gnuefi=no
+AC_ARG_ENABLE(gnuefi, AS_HELP_STRING([--enable-gnuefi], [Disable optional gnuefi support]))
+AS_IF([test "x$enable_gnuefi" != "xno"], [
+        AC_CHECK_HEADERS(efi/${EFI_ARCH}/efibind.h,
+                [AC_DEFINE(HAVE_GNUEFI, 1, [Define if gnuefi is available])
+                 have_gnuefi=yes],
+                [AS_IF([test "x$enable_gnuefi" = xyes],
+                       [AC_MSG_ERROR([*** gnuefi support requested but headers not found])])
+        ])
+
+        efiroot=$(echo $(cd /usr/lib/$(gcc -print-multi-os-directory); pwd))
+
+        EFI_LIB_DIR="$efiroot"
+        AC_ARG_WITH(efi-libdir,
+                AS_HELP_STRING([--with-efi-libdir=PATH], [Path to EFI lib directory]),
+                [EFI_LIB_DIR="$withval"], [EFI_LIB_DIR="$efiroot"]
+        )
+        AC_SUBST([EFI_LIB_DIR])
+
+        have_efi_lds=no
+        AC_ARG_WITH(efi-ldsdir,
+                AS_HELP_STRING([--with-efi-ldsdir=PATH], [Path to EFI lds directory]),
+                [EFI_LDS_DIR="$withval" && AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+                        [have_efi_lds=yes])],
+                [AS_FOR([DIR], [EFI_LDS_DIR], ["${efiroot}/gnuefi" "${efiroot}"],
+                        [AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+                                       [have_efi_lds=yes && break])])])
+        AS_IF([test "x$have_efi_lds" = xyes],
+              [AC_SUBST([EFI_LDS_DIR])],
+              [AS_IF([test "x$enable_gnuefi" = xyes],
+                     [AC_MSG_ERROR([*** gnuefi support requested but files not found])],
+                     [have_gnuefi=no])])
+
+        AC_ARG_WITH(efi-includedir,
+                AS_HELP_STRING([--with-efi-includedir=PATH], [Path to EFI include directory]),
+                [EFI_INC_DIR="$withval"], [EFI_INC_DIR="/usr/include"]
+        )
+        AC_SUBST([EFI_INC_DIR])
+])
+AM_CONDITIONAL(HAVE_GNUEFI, [test "x$have_gnuefi" = xyes])
+
+# ------------------------------------------------------------------------------
 AC_ARG_WITH(unifont,
         AS_HELP_STRING([--with-unifont=PATH],
                 [Path to unifont.hex]),
@@ -1392,6 +1451,14 @@ AS_IF([test "x$0" != "x./configure"], [
         AC_SUBST([INTLTOOL_UPDATE], [/bin/true])
 ])
 
+# QEMU and OVMF UEFI firmware
+AS_IF([test x"$cross_compiling" = "xyes"], [], [
+        AC_PATH_PROG([QEMU], [qemu-system-x86_64])
+        AC_CHECK_FILE([/usr/share/qemu/bios-ovmf.bin], [QEMU_BIOS=/usr/share/qemu/bios-ovmf.bin],
+                [AC_CHECK_FILE([/usr/share/qemu-ovmf/bios.bin], [QEMU_BIOS=/usr/share/qemu-ovmf/bios.bin])])
+        AC_SUBST([QEMU_BIOS])
+])
+
 AC_ARG_ENABLE(tests,
         [AC_HELP_STRING([--disable-tests], [disable tests])],
         enable_tests=$enableval, enable_tests=yes)
@@ -1496,6 +1563,13 @@ AC_MSG_RESULT([
         coredump:                ${have_coredump}
         polkit:                  ${have_polkit}
         efi:                     ${have_efi}
+        gnuefi:                  ${have_gnuefi}
+        efi arch:                ${EFI_ARCH}
+        EFI machine type:        ${EFI_MACHINE_TYPE_NAME}
+        EFI CC                   ${EFI_CC}
+        EFI libdir:              ${EFI_LIB_DIR}
+        EFI ldsdir:              ${EFI_LDS_DIR}
+        EFI includedir:          ${EFI_INC_DIR}
         kmod:                    ${have_kmod}
         xkbcommon:               ${have_xkbcommon}
         blkid:                   ${have_blkid}

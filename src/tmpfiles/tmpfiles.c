@@ -26,8 +26,6 @@
 #include <string.h>
 #include <limits.h>
 #include <dirent.h>
-#include <grp.h>
-#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -37,9 +35,8 @@
 #include <glob.h>
 #include <fnmatch.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/param.h>
 #include <sys/xattr.h>
+#include <linux/fs.h>
 
 #include "log.h"
 #include "util.h"
@@ -90,6 +87,8 @@ typedef enum ItemType {
         ADJUST_MODE = 'm', /* legacy, 'z' is identical to this */
         RELABEL_PATH = 'z',
         RECURSIVE_RELABEL_PATH = 'Z',
+        SET_ATTRIB = 'h',
+        RECURSIVE_SET_ATTRIB = 'H',
 } ItemType;
 
 typedef struct Item {
@@ -108,12 +107,15 @@ typedef struct Item {
         usec_t age;
 
         dev_t major_minor;
+        unsigned long attrib_value;
+        unsigned long attrib_mask;
 
         bool uid_set:1;
         bool gid_set:1;
         bool mode_set:1;
         bool age_set:1;
         bool mask_perms:1;
+        bool attrib_set:1;
 
         bool keep_first_level:1;
 
@@ -689,7 +691,7 @@ static int get_acls_from_arg(Item *item) {
          * afterwards, so the mask can be added now if necessary. */
         r = parse_acl(item->argument, &item->acl_access, &item->acl_default, !item->force);
         if (r < 0)
-                log_warning_errno(errno, "Failed to parse ACL \"%s\": %m. Ignoring",
+                log_warning_errno(r, "Failed to parse ACL \"%s\": %m. Ignoring",
                                   item->argument);
 #else
         log_warning_errno(ENOSYS, "ACLs are not supported. Ignoring");
@@ -703,6 +705,9 @@ static int path_set_acl(const char *path, acl_type_t type, acl_t acl, bool modif
         _cleanup_(acl_freep) acl_t dup = NULL;
         int r;
         _cleanup_(acl_free_charpp) char *t = NULL;
+
+        /* Returns 0 for success, positive error if already warned,
+         * negative error otherwise. */
 
         if (modify) {
                 r = acls_for_file(path, type, acl, &dup);
@@ -731,33 +736,155 @@ static int path_set_acl(const char *path, acl_type_t type, acl_t acl, bool modif
 
         r = acl_set_file(path, type, dup);
         if (r < 0)
-                return log_error_errno(-errno,
-                                       "Setting %s ACL \"%s\" on %s failed: %m",
-                                       type == ACL_TYPE_ACCESS ? "access" : "default",
-                                       strna(t), path);
+                return -log_error_errno(errno,
+                                        "Setting %s ACL \"%s\" on %s failed: %m",
+                                        type == ACL_TYPE_ACCESS ? "access" : "default",
+                                        strna(t), path);
+
         return 0;
 }
 #endif
 
 static int path_set_acls(Item *item, const char *path) {
+        int r = 0;
 #ifdef HAVE_ACL
-        int r;
-
         assert(item);
         assert(path);
 
-        if (item->acl_access) {
+        if (item->acl_access)
                 r = path_set_acl(path, ACL_TYPE_ACCESS, item->acl_access, item->force);
-                if (r < 0)
-                        return r;
+
+        if (r == 0 && item->acl_default)
+                r = path_set_acl(path, ACL_TYPE_DEFAULT, item->acl_default, item->force);
+
+        if (r > 0)
+                return -r; /* already warned */
+        else if (r == -EOPNOTSUPP) {
+                log_debug_errno(r, "ACLs not supported by file system at %s", path);
+                return 0;
+        } else if (r < 0)
+                log_error_errno(r, "ACL operation on \"%s\" failed: %m", path);
+#endif
+        return r;
+}
+
+#define ALL_ATTRIBS          \
+        FS_NOATIME_FL      | \
+        FS_SYNC_FL         | \
+        FS_DIRSYNC_FL      | \
+        FS_APPEND_FL       | \
+        FS_COMPR_FL        | \
+        FS_NODUMP_FL       | \
+        FS_EXTENT_FL       | \
+        FS_IMMUTABLE_FL    | \
+        FS_JOURNAL_DATA_FL | \
+        FS_SECRM_FL        | \
+        FS_UNRM_FL         | \
+        FS_NOTAIL_FL       | \
+        FS_TOPDIR_FL       | \
+        FS_NOCOW_FL
+
+static int get_attrib_from_arg(Item *item) {
+        static const unsigned attributes[] = {
+                [(uint8_t)'A'] = FS_NOATIME_FL,      /* do not update atime */
+                [(uint8_t)'S'] = FS_SYNC_FL,         /* Synchronous updates */
+                [(uint8_t)'D'] = FS_DIRSYNC_FL,      /* dirsync behaviour (directories only) */
+                [(uint8_t)'a'] = FS_APPEND_FL,       /* writes to file may only append */
+                [(uint8_t)'c'] = FS_COMPR_FL,        /* Compress file */
+                [(uint8_t)'d'] = FS_NODUMP_FL,       /* do not dump file */
+                [(uint8_t)'e'] = FS_EXTENT_FL,       /* Top of directory hierarchies*/
+                [(uint8_t)'i'] = FS_IMMUTABLE_FL,    /* Immutable file */
+                [(uint8_t)'j'] = FS_JOURNAL_DATA_FL, /* Reserved for ext3 */
+                [(uint8_t)'s'] = FS_SECRM_FL,        /* Secure deletion */
+                [(uint8_t)'u'] = FS_UNRM_FL,         /* Undelete */
+                [(uint8_t)'t'] = FS_NOTAIL_FL,       /* file tail should not be merged */
+                [(uint8_t)'T'] = FS_TOPDIR_FL,       /* Top of directory hierarchies*/
+                [(uint8_t)'C'] = FS_NOCOW_FL,        /* Do not cow file */
+        };
+        char *p = item->argument;
+        enum {
+                MODE_ADD,
+                MODE_DEL,
+                MODE_SET
+        } mode = MODE_ADD;
+        unsigned long value = 0, mask = 0;
+
+        if (!p) {
+                log_error("\"%s\": setting ATTR need an argument", item->path);
+                return -EINVAL;
         }
 
-        if (item->acl_default) {
-                r = path_set_acl(path, ACL_TYPE_DEFAULT, item->acl_default, item->force);
-                if (r < 0)
-                        return r;
+        if (*p == '+') {
+                mode = MODE_ADD;
+                p++;
+        } else if (*p == '-') {
+                mode = MODE_DEL;
+                p++;
+        } else  if (*p == '=') {
+                mode = MODE_SET;
+                p++;
         }
-#endif
+
+        if (!*p && mode != MODE_SET) {
+                log_error("\"%s\": setting ATTR: argument is empty", item->path);
+                return -EINVAL;
+        }
+        for (; *p ; p++) {
+                if ((uint8_t)*p > ELEMENTSOF(attributes) || attributes[(uint8_t)*p] == 0) {
+                        log_error("\"%s\": setting ATTR: unknown attr '%c'", item->path, *p);
+                        return -EINVAL;
+                }
+                if (mode == MODE_ADD || mode == MODE_SET)
+                        value |= attributes[(uint8_t)*p];
+                else
+                        value &= ~attributes[(uint8_t)*p];
+                mask |= attributes[(uint8_t)*p];
+        }
+
+        if (mode == MODE_SET)
+                mask |= ALL_ATTRIBS;
+
+        assert(mask);
+
+        item->attrib_mask = mask;
+        item->attrib_value = value;
+        item->attrib_set = true;
+
+        return 0;
+
+}
+
+static int path_set_attrib(Item *item, const char *path) {
+        _cleanup_close_ int fd = -1;
+        int r;
+        unsigned f;
+        struct stat st;
+
+        /* do nothing */
+        if (item->attrib_mask == 0 || !item->attrib_set)
+                return 0;
+        /*
+         * It is OK to ignore an lstat() error, because the error
+         * will be catch by the open() below anyway
+         */
+        if (lstat(path, &st) == 0 &&
+            !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+                return 0;
+        }
+
+        fd = open(path, O_RDONLY|O_NONBLOCK|O_CLOEXEC);
+
+        if (fd < 0)
+                return log_error_errno(errno, "Cannot open \"%s\": %m", path);
+
+        f = item->attrib_value & item->attrib_mask;
+        if (!S_ISDIR(st.st_mode))
+                f &= ~FS_DIRSYNC_FL;
+        r = change_attr_fd(fd, f, item->attrib_mask);
+        if (r < 0)
+                return log_error_errno(errno,
+                        "Cannot set attrib for \"%s\", value=0x%08lx, mask=0x%08lx: %m",
+                        path, item->attrib_value, item->attrib_mask);
 
         return 0;
 }
@@ -1203,9 +1330,19 @@ static int create_item(Item *i) {
                 if (r < 0)
                         return r;
                 break;
-        }
 
-        log_debug("%s created successfully.", i->path);
+        case SET_ATTRIB:
+                r = glob_item(i, path_set_attrib, false);
+                if (r < 0)
+                        return r;
+                break;
+
+        case RECURSIVE_SET_ATTRIB:
+                r = glob_item(i, path_set_attrib, true);
+                if (r < 0)
+                        return r;
+                break;
+        }
 
         return 0;
 }
@@ -1269,6 +1406,8 @@ static int remove_item(Item *i) {
         case RECURSIVE_SET_XATTR:
         case SET_ACL:
         case RECURSIVE_SET_ACL:
+        case SET_ATTRIB:
+        case RECURSIVE_SET_ATTRIB:
                 break;
 
         case REMOVE_PATH:
@@ -1506,23 +1645,25 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
         _cleanup_(item_free_contents) Item i = {};
         ItemArray *existing;
         Hashmap *h;
-        int r, c = -1, pos;
+        int r, pos;
         bool force = false, boot = false;
 
         assert(fname);
         assert(line >= 1);
         assert(buffer);
 
-        r = sscanf(buffer,
-                   "%ms %ms %ms %ms %ms %ms %n",
+        r = unquote_many_words(&buffer,
                    &action,
                    &path,
                    &mode,
                    &user,
                    &group,
                    &age,
-                   &c);
-        if (r < 2) {
+                   &i.argument,
+                   NULL);
+        if (r < 0)
+                return log_error_errno(r, "[%s:%u] Failed to parse line: %m", fname, line);
+        else if (r < 2) {
                 log_error("[%s:%u] Syntax error.", fname, line);
                 return -EIO;
         }
@@ -1557,15 +1698,6 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
         if (r < 0) {
                 log_error("[%s:%u] Failed to replace specifiers: %s", fname, line, path);
                 return r;
-        }
-
-        if (c >= 0)  {
-                c += strspn(buffer+c, WHITESPACE);
-                if (buffer[c] != 0 && (buffer[c] != '-' || buffer[c+1] != 0)) {
-                        i.argument = unquote(buffer+c, "\"");
-                        if (!i.argument)
-                                return log_oom();
-                }
         }
 
         switch (i.type) {
@@ -1649,6 +1781,17 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
                         return -EBADMSG;
                 }
                 r = get_acls_from_arg(&i);
+                if (r < 0)
+                        return r;
+                break;
+
+        case SET_ATTRIB:
+        case RECURSIVE_SET_ATTRIB:
+                if (!i.argument) {
+                        log_error("[%s:%u] Set attrib requires argument.", fname, line);
+                        return -EBADMSG;
+                }
+                r = get_attrib_from_arg(&i);
                 if (r < 0)
                         return r;
                 break;
@@ -1746,9 +1889,11 @@ static int parse_line(const char *fname, unsigned line, const char *buffer) {
                 unsigned n;
 
                 for (n = 0; n < existing->count; n++) {
-                        if (!item_compatible(existing->items + n, &i))
+                        if (!item_compatible(existing->items + n, &i)) {
                                 log_warning("[%s:%u] Duplicate line for path \"%s\", ignoring.",
                                             fname, line, i.path);
+                                return 0;
+                        }
                 }
         } else {
                 existing = new0(ItemArray, 1);

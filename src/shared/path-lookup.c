@@ -19,18 +19,16 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "util.h"
-#include "mkdir.h"
 #include "strv.h"
 #include "path-util.h"
 #include "path-lookup.h"
+#include "install.h"
 
 int user_config_home(char **config_home) {
         const char *e;

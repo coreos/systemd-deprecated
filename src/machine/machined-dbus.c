@@ -22,26 +22,106 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-#include <pwd.h>
 
 #include "sd-id128.h"
-#include "sd-messages.h"
-#include "strv.h"
-#include "mkdir.h"
 #include "path-util.h"
-#include "special.h"
-#include "fileio-label.h"
-#include "label.h"
-#include "utf8.h"
 #include "unit-name.h"
 #include "bus-util.h"
 #include "bus-common-errors.h"
-#include "time-util.h"
 #include "cgroup-util.h"
+#include "btrfs-util.h"
 #include "machine-image.h"
+#include "machine-pool.h"
 #include "image-dbus.h"
 #include "machined.h"
 #include "machine-dbus.h"
+
+static int property_get_pool_path(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        assert(bus);
+        assert(reply);
+
+        return sd_bus_message_append(reply, "s", "/var/lib/machines");
+}
+
+static int property_get_pool_usage(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        _cleanup_close_ int fd = -1;
+        uint64_t usage = (uint64_t) -1;
+        struct stat st;
+
+        assert(bus);
+        assert(reply);
+
+        /* We try to read the quota info from /var/lib/machines, as
+         * well as the usage of the loopback file
+         * /var/lib/machines.raw, and pick the larger value. */
+
+        fd = open("/var/lib/machines", O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+        if (fd >= 0) {
+                BtrfsQuotaInfo q;
+
+                if (btrfs_subvol_get_quota_fd(fd, &q) >= 0)
+                        usage = q.referenced;
+        }
+
+        if (stat("/var/lib/machines.raw", &st) >= 0) {
+                if (usage == (uint64_t) -1 || st.st_blocks * 512ULL > usage)
+                        usage = st.st_blocks * 512ULL;
+        }
+
+        return sd_bus_message_append(reply, "t", usage);
+}
+
+static int property_get_pool_limit(
+                sd_bus *bus,
+                const char *path,
+                const char *interface,
+                const char *property,
+                sd_bus_message *reply,
+                void *userdata,
+                sd_bus_error *error) {
+
+        _cleanup_close_ int fd = -1;
+        uint64_t size = (uint64_t) -1;
+        struct stat st;
+
+        assert(bus);
+        assert(reply);
+
+        /* We try to read the quota limit from /var/lib/machines, as
+         * well as the size of the loopback file
+         * /var/lib/machines.raw, and pick the smaller value. */
+
+        fd = open("/var/lib/machines", O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+        if (fd >= 0) {
+                BtrfsQuotaInfo q;
+
+                if (btrfs_subvol_get_quota_fd(fd, &q) >= 0)
+                        size = q.referenced_max;
+        }
+
+        if (stat("/var/lib/machines.raw", &st) >= 0) {
+                if (size == (uint64_t) -1 || (uint64_t) st.st_size < size)
+                        size = st.st_size;
+        }
+
+        return sd_bus_message_append(reply, "t", size);
+}
 
 static int method_get_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_free_ char *p = NULL;
@@ -559,6 +639,48 @@ static int method_open_machine_login(sd_bus *bus, sd_bus_message *message, void 
         return bus_machine_method_open_login(bus, message, machine, error);
 }
 
+static int method_bind_mount_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        Machine *machine;
+        const char *name;
+        int r;
+
+        assert(bus);
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        machine = hashmap_get(m->machines, name);
+        if (!machine)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
+
+        return bus_machine_method_bind_mount(bus, message, machine, error);
+}
+
+static int method_copy_machine(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        Machine *machine;
+        const char *name;
+        int r;
+
+        assert(bus);
+        assert(message);
+        assert(m);
+
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        machine = hashmap_get(m->machines, name);
+        if (!machine)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_MACHINE, "No machine '%s' known", name);
+
+        return bus_machine_method_copy(bus, message, machine, error);
+}
+
 static int method_remove_image(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
         _cleanup_(image_unrefp) Image* i = NULL;
         const char *name;
@@ -580,6 +702,7 @@ static int method_remove_image(sd_bus *bus, sd_bus_message *message, void *userd
         if (r == 0)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
 
+        i->userdata = userdata;
         return bus_image_method_remove(bus, message, i, error);
 }
 
@@ -604,6 +727,7 @@ static int method_rename_image(sd_bus *bus, sd_bus_message *message, void *userd
         if (r == 0)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", old_name);
 
+        i->userdata = userdata;
         return bus_image_method_rename(bus, message, i, error);
 }
 
@@ -626,6 +750,7 @@ static int method_clone_image(sd_bus *bus, sd_bus_message *message, void *userda
         if (r == 0)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", old_name);
 
+        i->userdata = userdata;
         return bus_image_method_clone(bus, message, i, error);
 }
 
@@ -648,11 +773,81 @@ static int method_mark_image_read_only(sd_bus *bus, sd_bus_message *message, voi
         if (r == 0)
                 return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
 
+        i->userdata = userdata;
         return bus_image_method_mark_read_only(bus, message, i, error);
+}
+
+static int method_set_pool_limit(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        Manager *m = userdata;
+        uint64_t limit;
+        int r;
+
+        assert(bus);
+        r = sd_bus_message_read(message, "t", &limit);
+        if (r < 0)
+                return r;
+
+        r = bus_verify_polkit_async(
+                        message,
+                        CAP_SYS_ADMIN,
+                        "org.freedesktop.machine1.manage-machines",
+                        false,
+                        UID_INVALID,
+                        &m->polkit_registry,
+                        error);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return 1; /* Will call us back */
+
+        /* Set up the machine directory if necessary */
+        r = setup_machine_directory(limit, error);
+        if (r < 0)
+                return r;
+
+        r = btrfs_resize_loopback("/var/lib/machines", limit, false);
+        if (r == -ENOTTY)
+                return sd_bus_error_setf(error, SD_BUS_ERROR_NOT_SUPPORTED, "Quota is only supported on btrfs.");
+        if (r < 0 && r != -ENODEV) /* ignore ENODEV, as that's what is returned if the file system is not on loopback */
+                return sd_bus_error_set_errnof(error, r, "Failed to adjust loopback limit: %m");
+
+        r = btrfs_quota_limit("/var/lib/machines", limit);
+        if (r == -ENOTTY)
+                return sd_bus_error_setf(error, SD_BUS_ERROR_NOT_SUPPORTED, "Quota is only supported on btrfs.");
+        if (r < 0)
+                return sd_bus_error_set_errnof(error, r, "Failed to adjust quota limit: %m");
+
+        return sd_bus_reply_method_return(message, NULL);
+}
+
+static int method_set_image_limit(sd_bus *bus, sd_bus_message *message, void *userdata, sd_bus_error *error) {
+        _cleanup_(image_unrefp) Image *i = NULL;
+        const char *name;
+        int r;
+
+        assert(bus);
+        r = sd_bus_message_read(message, "s", &name);
+        if (r < 0)
+                return r;
+
+        if (!image_name_is_valid(name))
+                return sd_bus_error_setf(error, SD_BUS_ERROR_INVALID_ARGS, "Image name '%s' is invalid.", name);
+
+        r = image_find(name, &i);
+        if (r < 0)
+                return r;
+        if (r == 0)
+                return sd_bus_error_setf(error, BUS_ERROR_NO_SUCH_IMAGE, "No image '%s' known", name);
+
+        i->userdata = userdata;
+        return bus_image_method_set_limit(bus, message, i, error);
 }
 
 const sd_bus_vtable manager_vtable[] = {
         SD_BUS_VTABLE_START(0),
+        SD_BUS_PROPERTY("PoolPath", "s", property_get_pool_path, 0, 0),
+        SD_BUS_PROPERTY("PoolUsage", "t", property_get_pool_usage, 0, 0),
+        SD_BUS_PROPERTY("PoolLimit", "t", property_get_pool_limit, 0, 0),
         SD_BUS_METHOD("GetMachine", "s", "o", method_get_machine, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetImage", "s", "o", method_get_image, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetMachineByPID", "u", "o", method_get_machine_by_pid, SD_BUS_VTABLE_UNPRIVILEGED),
@@ -662,16 +857,21 @@ const sd_bus_vtable manager_vtable[] = {
         SD_BUS_METHOD("CreateMachineWithNetwork", "sayssusaia(sv)", "o", method_create_machine_with_network, 0),
         SD_BUS_METHOD("RegisterMachine", "sayssus", "o", method_register_machine, 0),
         SD_BUS_METHOD("RegisterMachineWithNetwork", "sayssusai", "o", method_register_machine_with_network, 0),
-        SD_BUS_METHOD("KillMachine", "ssi", NULL, method_kill_machine, SD_BUS_VTABLE_CAPABILITY(CAP_KILL)),
-        SD_BUS_METHOD("TerminateMachine", "s", NULL, method_terminate_machine, SD_BUS_VTABLE_CAPABILITY(CAP_KILL)),
+        SD_BUS_METHOD("TerminateMachine", "s", NULL, method_terminate_machine, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("KillMachine", "ssi", NULL, method_kill_machine, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetMachineAddresses", "s", "a(iay)", method_get_machine_addresses, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("GetMachineOSRelease", "s", "a{ss}", method_get_machine_os_release, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_METHOD("OpenMachinePTY", "s", "hs", method_open_machine_pty, 0),
         SD_BUS_METHOD("OpenMachineLogin", "s", "hs", method_open_machine_login, SD_BUS_VTABLE_UNPRIVILEGED),
-        SD_BUS_METHOD("RemoveImage", "s", NULL, method_remove_image, 0),
-        SD_BUS_METHOD("RenameImage", "ss", NULL, method_rename_image, 0),
-        SD_BUS_METHOD("CloneImage", "ssb", NULL, method_clone_image, 0),
-        SD_BUS_METHOD("MarkImageReadOnly", "sb", NULL, method_mark_image_read_only, 0),
+        SD_BUS_METHOD("BindMountMachine", "sssbb", NULL, method_bind_mount_machine, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("CopyFromMachine", "sss", NULL, method_copy_machine, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("CopyToMachine", "sss", NULL, method_copy_machine, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RemoveImage", "s", NULL, method_remove_image, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("RenameImage", "ss", NULL, method_rename_image, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("CloneImage", "ssb", NULL, method_clone_image, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("MarkImageReadOnly", "sb", NULL, method_mark_image_read_only, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("SetPoolLimit", "t", NULL, method_set_pool_limit, SD_BUS_VTABLE_UNPRIVILEGED),
+        SD_BUS_METHOD("SetImageLimit", "st", NULL, method_set_image_limit, SD_BUS_VTABLE_UNPRIVILEGED),
         SD_BUS_SIGNAL("MachineNew", "so", 0),
         SD_BUS_SIGNAL("MachineRemoved", "so", 0),
         SD_BUS_VTABLE_END

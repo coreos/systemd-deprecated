@@ -19,16 +19,13 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include "sd-id128.h"
 #include "unit.h"
 #include "specifier.h"
-#include "path-util.h"
 #include "strv.h"
 #include "unit-name.h"
 #include "unit-printf.h"
 #include "macro.h"
 #include "cgroup-util.h"
-#include "special.h"
 
 static int specifier_prefix_and_instance(char specifier, void *data, void *userdata, char **ret) {
         Unit *u = userdata;
@@ -84,7 +81,7 @@ static int specifier_instance_unescaped(char specifier, void *data, void *userda
         assert(u);
 
         if (!u->instance)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         n = unit_name_unescape(u->instance);
         if (!n)
@@ -167,7 +164,7 @@ static int specifier_runtime(char specifier, void *data, void *userdata, char **
         else {
                 e = getenv("XDG_RUNTIME_DIR");
                 if (!e)
-                        return -ENOTSUP;
+                        return -EOPNOTSUPP;
         }
 
         n = strdup(e);
@@ -188,7 +185,7 @@ static int specifier_user_name(char specifier, void *data, void *userdata, char 
 
         c = unit_get_exec_context(u);
         if (!c)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         if (u->manager->running_as == SYSTEMD_SYSTEM) {
 
@@ -251,7 +248,7 @@ static int specifier_user_home(char specifier, void *data, void *userdata, char 
 
         c = unit_get_exec_context(u);
         if (!c)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         if (u->manager->running_as == SYSTEMD_SYSTEM) {
 
@@ -261,7 +258,7 @@ static int specifier_user_home(char specifier, void *data, void *userdata, char 
                 if (!c->user || streq(c->user, "root") || streq(c->user, "0"))
                         n = strdup("/root");
                 else
-                        return -ENOTSUP;
+                        return -EOPNOTSUPP;
 
         } else {
 
@@ -299,7 +296,7 @@ static int specifier_user_shell(char specifier, void *data, void *userdata, char
 
         c = unit_get_exec_context(u);
         if (!c)
-                return -ENOTSUP;
+                return -EOPNOTSUPP;
 
         if (u->manager->running_as == SYSTEMD_SYSTEM) {
 
@@ -309,7 +306,7 @@ static int specifier_user_shell(char specifier, void *data, void *userdata, char
                 if (!c->user || streq(c->user, "root") || streq(c->user, "0"))
                         n = strdup("/bin/sh");
                 else
-                        return -ENOTSUP;
+                        return -EOPNOTSUPP;
 
         } else {
 

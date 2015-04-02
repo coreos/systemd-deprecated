@@ -34,7 +34,6 @@
 #include "journal-authenticate.h"
 #include "lookup3.h"
 #include "compress.h"
-#include "fsprg.h"
 
 #define DEFAULT_DATA_HASH_TABLE_SIZE (2047ULL*sizeof(HashItem))
 #define DEFAULT_FIELD_HASH_TABLE_SIZE (333ULL*sizeof(HashItem))
@@ -2014,8 +2013,7 @@ void journal_file_reset_location(JournalFile *f) {
         f->current_xor_hash = 0;
 }
 
-void journal_file_save_location(JournalFile *f, direction_t direction, Object *o, uint64_t offset) {
-        f->last_direction = direction;
+void journal_file_save_location(JournalFile *f, Object *o, uint64_t offset) {
         f->location_type = LOCATION_SEEK;
         f->current_offset = offset;
         f->current_seqnum = le64toh(o->entry.seqnum);
@@ -2611,8 +2609,8 @@ int journal_file_open(
                  * shouldn't be too bad, given that we do our own
                  * checksumming). */
                 r = chattr_fd(f->fd, true, FS_NOCOW_FL);
-                if (r < 0)
-                        log_warning_errno(errno, "Failed to set file attributes: %m");
+                if (r < 0 && r != -ENOTTY)
+                        log_warning_errno(r, "Failed to set file attributes: %m");
 
                 /* Let's attach the creation time to the journal file,
                  * so that the vacuuming code knows the age of this
@@ -2653,10 +2651,8 @@ int journal_file_open(
         }
 
         r = mmap_cache_get(f->mmap, f->fd, f->prot, CONTEXT_HEADER, true, 0, PAGE_ALIGN(sizeof(Header)), &f->last_stat, &h);
-        if (r < 0) {
-                r = -errno;
+        if (r < 0)
                 goto fail;
-        }
 
         f->header = h;
 
@@ -2797,14 +2793,15 @@ int journal_file_open_reliably(
 
         r = journal_file_open(fname, flags, mode, compress, seal,
                               metrics, mmap_cache, template, ret);
-        if (r != -EBADMSG && /* corrupted */
-            r != -ENODATA && /* truncated */
-            r != -EHOSTDOWN && /* other machine */
-            r != -EPROTONOSUPPORT && /* incompatible feature */
-            r != -EBUSY && /* unclean shutdown */
-            r != -ESHUTDOWN && /* already archived */
-            r != -EIO && /* IO error, including SIGBUS on mmap */
-            r != -EIDRM /* File has been deleted */)
+        if (!IN_SET(r,
+                    -EBADMSG,           /* corrupted */
+                    -ENODATA,           /* truncated */
+                    -EHOSTDOWN,         /* other machine */
+                    -EPROTONOSUPPORT,   /* incompatible feature */
+                    -EBUSY,             /* unclean shutdown */
+                    -ESHUTDOWN,         /* already archived */
+                    -EIO,               /* IO error, including SIGBUS on mmap */
+                    -EIDRM              /* File has been deleted */))
                 return r;
 
         if ((flags & O_ACCMODE) == O_RDONLY)
@@ -2819,9 +2816,9 @@ int journal_file_open_reliably(
         /* The file is corrupted. Rotate it away and try it again (but only once) */
 
         l = strlen(fname);
-        if (asprintf(&p, "%.*s@%016llx-%016" PRIx64 ".journal~",
+        if (asprintf(&p, "%.*s@%016"PRIx64 "-%016"PRIx64 ".journal~",
                      (int) l - 8, fname,
-                     (unsigned long long) now(CLOCK_REALTIME),
+                     now(CLOCK_REALTIME),
                      random_u64()) < 0)
                 return -ENOMEM;
 

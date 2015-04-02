@@ -1,9 +1,11 @@
 /*-*- Mode: C; c-basic-offset: 8; indent-tabs-mode: nil -*-*/
 
+#pragma once
+
 /***
   This file is part of systemd.
 
-  Copyright 2014 Lennart Poettering
+  Copyright 2015 Lennart Poettering
 
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -19,18 +21,17 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#pragma once
-
 #include "sd-event.h"
-#include "util.h"
+#include "macro.h"
+#include "import-util.h"
 
-typedef struct DkrImport DkrImport;
+typedef struct TarPull TarPull;
 
-typedef void (*DkrImportFinished)(DkrImport *import, int error, void *userdata);
+typedef void (*TarPullFinished)(TarPull *pull, int error, void *userdata);
 
-int dkr_import_new(DkrImport **import, sd_event *event, const char *index_url, const char *image_root, DkrImportFinished on_finished, void *userdata);
-DkrImport* dkr_import_unref(DkrImport *import);
+int tar_pull_new(TarPull **pull, sd_event *event, const char *image_root, TarPullFinished on_finished, void *userdata);
+TarPull* tar_pull_unref(TarPull *pull);
 
-DEFINE_TRIVIAL_CLEANUP_FUNC(DkrImport*, dkr_import_unref);
+DEFINE_TRIVIAL_CLEANUP_FUNC(TarPull*, tar_pull_unref);
 
-int dkr_import_pull(DkrImport *import, const char *name, const char *tag, const char *local, bool force_local);
+int tar_pull_start(TarPull *pull, const char *url, const char *local, bool force_local, ImportVerify verify);

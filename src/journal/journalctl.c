@@ -28,12 +28,10 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <time.h>
 #include <getopt.h>
 #include <signal.h>
 #include <poll.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <sys/inotify.h>
 #include <linux/fs.h>
 
@@ -54,7 +52,6 @@
 #include "journal-internal.h"
 #include "journal-def.h"
 #include "journal-verify.h"
-#include "journal-authenticate.h"
 #include "journal-qrcode.h"
 #include "journal-vacuum.h"
 #include "fsprg.h"
@@ -579,7 +576,7 @@ static int parse_argv(int argc, char *argv[]) {
                 case ARG_INTERVAL:
                 case ARG_FORCE:
                         log_error("Forward-secure sealing not available.");
-                        return -ENOTSUP;
+                        return -EOPNOTSUPP;
 #endif
 
                 case 'p': {
@@ -1289,7 +1286,6 @@ static int setup_keys(void) {
 #ifdef HAVE_GCRYPT
         size_t mpk_size, seed_size, state_size, i;
         uint8_t *mpk, *seed, *state;
-        ssize_t l;
         int fd = -1, r;
         sd_id128_t machine, boot;
         char *p = NULL, *k = NULL;
@@ -1319,19 +1315,16 @@ static int setup_keys(void) {
                      SD_ID128_FORMAT_VAL(machine)) < 0)
                 return log_oom();
 
-        if (access(p, F_OK) >= 0) {
-                if (arg_force) {
-                        r = unlink(p);
-                        if (r < 0) {
-                                log_error_errno(errno, "unlink(\"%s\") failed: %m", p);
-                                r = -errno;
-                                goto finish;
-                        }
-                } else {
-                        log_error("Sealing key file %s exists already. (--force to recreate)", p);
-                        r = -EEXIST;
+        if (arg_force) {
+                r = unlink(p);
+                if (r < 0 && errno != ENOENT) {
+                        r = log_error_errno(errno, "unlink(\"%s\") failed: %m", p);
                         goto finish;
                 }
+        } else if (access(p, F_OK) >= 0) {
+                log_error("Sealing key file %s exists already. Use --force to recreate.", p);
+                r = -EEXIST;
+                goto finish;
         }
 
         if (asprintf(&k, "/var/log/journal/" SD_ID128_FORMAT_STR "/fss.tmp.XXXXXX",
@@ -1357,10 +1350,9 @@ static int setup_keys(void) {
         }
 
         log_info("Generating seed...");
-        l = loop_read(fd, seed, seed_size, true);
-        if (l < 0 || (size_t) l != seed_size) {
-                log_error_errno(EIO, "Failed to read random seed: %m");
-                r = -EIO;
+        r = loop_read_exact(fd, seed, seed_size, true);
+        if (r < 0) {
+                log_error_errno(r, "Failed to read random seed: %m");
                 goto finish;
         }
 
@@ -1480,7 +1472,7 @@ finish:
         return r;
 #else
         log_error("Forward-secure sealing not available.");
-        return -ENOTSUP;
+        return -EOPNOTSUPP;
 #endif
 }
 
@@ -1542,10 +1534,17 @@ static int access_check_var_log_journal(sd_journal *j) {
         have_access = in_group("systemd-journal") > 0;
 
         if (!have_access) {
+                const char* dir;
+
+                if (access("/run/log/journal", F_OK) >= 0)
+                        dir = "/run/log/journal";
+                else
+                        dir = "/var/log/journal";
+
                 /* Let's enumerate all groups from the default ACL of
                  * the directory, which generally should allow access
                  * to most journal files too */
-                r = search_acl_groups(&g, "/var/log/journal/", &have_access);
+                r = search_acl_groups(&g, dir, &have_access);
                 if (r < 0)
                         return r;
         }
@@ -1571,7 +1570,7 @@ static int access_check_var_log_journal(sd_journal *j) {
                                 return log_oom();
 
                         log_notice("Hint: You are currently not seeing messages from other users and the system.\n"
-                                   "      Users in the groups '%s' can see all messages.\n"
+                                   "      Users in groups '%s' can see all messages.\n"
                                    "      Pass -q to turn off this notice.", s);
                 }
         }
@@ -1595,18 +1594,8 @@ static int access_check(sd_journal *j) {
 
         if (set_contains(j->errors, INT_TO_PTR(-EACCES))) {
 #ifdef HAVE_ACL
-                /* If /var/log/journal doesn't even exist,
-                 * unprivileged users have no access at all */
-                if (access("/var/log/journal", F_OK) < 0 &&
-                    geteuid() != 0 &&
-                    in_group("systemd-journal") <= 0) {
-                        log_error("Unprivileged users cannot access messages, unless persistent log storage is\n"
-                                  "enabled. Users in the 'systemd-journal' group may always access messages.");
-                        return -EACCES;
-                }
-
-                /* If /var/log/journal exists, try to pring a nice
-                   notice if the user lacks access to it */
+                /* If /run/log/journal or /var/log/journal exist, try
+                   to pring a nice notice if the user lacks access to it. */
                 if (!arg_quiet && geteuid() != 0) {
                         r = access_check_var_log_journal(j);
                         if (r < 0)

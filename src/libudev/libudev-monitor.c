@@ -23,12 +23,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
-#include <dirent.h>
 #include <poll.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
-#include <sys/un.h>
-#include <arpa/inet.h>
 #include <linux/netlink.h>
 #include <linux/filter.h>
 
@@ -698,13 +694,20 @@ retry:
 int udev_monitor_send_device(struct udev_monitor *udev_monitor,
                              struct udev_monitor *destination, struct udev_device *udev_device)
 {
-        const char *buf;
-        ssize_t blen;
-        ssize_t count;
-        struct msghdr smsg;
-        struct iovec iov[2];
-        const char *val;
-        struct udev_monitor_netlink_header nlh;
+        const char *buf, *val;
+        ssize_t blen, count;
+        struct udev_monitor_netlink_header nlh = {
+                .prefix = "libudev",
+                .magic = htonl(UDEV_MONITOR_MAGIC),
+                .header_size = sizeof nlh,
+        };
+        struct iovec iov[2] = {
+                { .iov_base = &nlh, .iov_len = sizeof nlh },
+        };
+        struct msghdr smsg = {
+                .msg_iov = iov,
+                .msg_iovlen = 2,
+        };
         struct udev_list_entry *list_entry;
         uint64_t tag_bloom_bits;
 
@@ -712,18 +715,13 @@ int udev_monitor_send_device(struct udev_monitor *udev_monitor,
         if (blen < 32)
                 return -EINVAL;
 
-        /* add versioned header */
-        memzero(&nlh, sizeof(struct udev_monitor_netlink_header));
-        memcpy(nlh.prefix, "libudev", 8);
-        nlh.magic = htonl(UDEV_MONITOR_MAGIC);
-        nlh.header_size = sizeof(struct udev_monitor_netlink_header);
+        /* fill in versioned header */
         val = udev_device_get_subsystem(udev_device);
         nlh.filter_subsystem_hash = htonl(util_string_hash32(val));
+
         val = udev_device_get_devtype(udev_device);
         if (val != NULL)
                 nlh.filter_devtype_hash = htonl(util_string_hash32(val));
-        iov[0].iov_base = &nlh;
-        iov[0].iov_len = sizeof(struct udev_monitor_netlink_header);
 
         /* add tag bloom filter */
         tag_bloom_bits = 0;
@@ -740,21 +738,26 @@ int udev_monitor_send_device(struct udev_monitor *udev_monitor,
         iov[1].iov_base = (char *)buf;
         iov[1].iov_len = blen;
 
-        memzero(&smsg, sizeof(struct msghdr));
-        smsg.msg_iov = iov;
-        smsg.msg_iovlen = 2;
         /*
          * Use custom address for target, or the default one.
          *
          * If we send to a multicast group, we will get
          * ECONNREFUSED, which is expected.
          */
-        if (destination != NULL)
+        if (destination)
                 smsg.msg_name = &destination->snl;
         else
                 smsg.msg_name = &udev_monitor->snl_destination;
         smsg.msg_namelen = sizeof(struct sockaddr_nl);
         count = sendmsg(udev_monitor->sock, &smsg, 0);
+        if (count < 0) {
+                if (!destination && errno == ECONNREFUSED) {
+                        log_debug("passed unknown number of bytes to netlink monitor %p", udev_monitor);
+                        return 0;
+                } else
+                        return -errno;
+        }
+
         log_debug("passed %zi bytes to netlink monitor %p", count, udev_monitor);
         return count;
 }

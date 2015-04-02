@@ -150,19 +150,19 @@ static int dev_if_packed_info(struct udev_device *dev, char *ifs_str, size_t len
         _cleanup_close_ int fd = -1;
         ssize_t size;
         unsigned char buf[18 + 65535];
-        int pos = 0;
+        size_t pos = 0;
         unsigned strpos = 0;
         struct usb_interface_descriptor {
-                u_int8_t        bLength;
-                u_int8_t        bDescriptorType;
-                u_int8_t        bInterfaceNumber;
-                u_int8_t        bAlternateSetting;
-                u_int8_t        bNumEndpoints;
-                u_int8_t        bInterfaceClass;
-                u_int8_t        bInterfaceSubClass;
-                u_int8_t        bInterfaceProtocol;
-                u_int8_t        iInterface;
-        } __attribute__((packed));
+                uint8_t bLength;
+                uint8_t bDescriptorType;
+                uint8_t bInterfaceNumber;
+                uint8_t bAlternateSetting;
+                uint8_t bNumEndpoints;
+                uint8_t bInterfaceClass;
+                uint8_t bInterfaceSubClass;
+                uint8_t bInterfaceProtocol;
+                uint8_t iInterface;
+        } _packed_;
 
         if (asprintf(&filename, "%s/descriptors", udev_device_get_syspath(dev)) < 0)
                 return log_oom();
@@ -178,7 +178,9 @@ static int dev_if_packed_info(struct udev_device *dev, char *ifs_str, size_t len
                 return -EIO;
 
         ifs_str[0] = '\0';
-        while (pos < size && strpos+7 < len-2) {
+        while (pos + sizeof(struct usb_interface_descriptor) < (size_t) size &&
+               strpos + 7 < len - 2) {
+
                 struct usb_interface_descriptor *desc;
                 char if_str[8];
 

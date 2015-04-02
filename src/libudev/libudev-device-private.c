@@ -17,7 +17,6 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
@@ -183,6 +182,7 @@ int udev_device_delete_db(struct udev_device *udev_device)
         if (id == NULL)
                 return -1;
         strscpyl(filename, sizeof(filename), "/run/udev/data/", id, NULL);
+
         unlink(filename);
         return 0;
 }

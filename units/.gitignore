@@ -28,6 +28,7 @@
 /systemd-firstboot.service
 /systemd-fsck-root.service
 /systemd-fsck@.service
+/systemd-fsckd.service
 /systemd-machine-id-commit.service
 /systemd-halt.service
 /systemd-hibernate.service
@@ -55,6 +56,7 @@
 /systemd-reboot.service
 /systemd-remount-fs.service
 /systemd-resolved.service
+/systemd-resolved.service.m4
 /systemd-hibernate-resume@.service
 /systemd-rfkill@.service
 /systemd-shutdownd.service

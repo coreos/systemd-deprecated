@@ -20,11 +20,8 @@
 ***/
 
 #include <errno.h>
-#include <string.h>
-#include <unistd.h>
 
 #include "dropin.h"
-#include "fileio.h"
 #include "generator.h"
 #include "hashmap.h"
 #include "log.h"
@@ -376,13 +373,6 @@ static int add_crypttab_devices(void) {
                 log_error_errno(errno, "Failed to stat /etc/crypttab: %m");
                 return 0;
         }
-
-        /* If we readd support for specifying passphrases
-         * directly in crypttab we should upgrade the warning
-         * below, though possibly only if a passphrase is
-         * specified directly. */
-        if (st.st_mode & 0005)
-                log_debug("/etc/crypttab is world-readable. This is usually not a good idea.");
 
         for (;;) {
                 int r, k;

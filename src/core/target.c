@@ -19,13 +19,9 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include <errno.h>
-#include <signal.h>
-#include <unistd.h>
 
 #include "unit.h"
 #include "target.h"
-#include "load-fragment.h"
 #include "log.h"
 #include "dbus-target.h"
 #include "special.h"
@@ -107,7 +103,7 @@ static int target_load(Unit *u) {
         return 0;
 }
 
-static int target_coldplug(Unit *u) {
+static int target_coldplug(Unit *u, Hashmap *deferred_work) {
         Target *t = TARGET(u);
 
         assert(t);

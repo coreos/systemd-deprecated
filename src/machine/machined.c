@@ -20,17 +20,11 @@
 ***/
 
 #include <errno.h>
-#include <pwd.h>
-#include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/epoll.h>
 
 #include "sd-daemon.h"
-#include "strv.h"
-#include "conf-parser.h"
 #include "cgroup-util.h"
-#include "mkdir.h"
 #include "bus-util.h"
 #include "bus-error.h"
 #include "label.h"
@@ -324,6 +318,8 @@ int main(int argc, char *argv[]) {
          * machined is available, so please always make sure this
          * check stays in. */
         mkdir_label("/run/systemd/machines", 0755);
+
+        assert_se(sigprocmask_many(SIG_BLOCK, SIGCHLD, -1) >= 0);
 
         m = manager_new();
         if (!m) {

@@ -24,12 +24,10 @@
 typedef struct Service Service;
 typedef struct ServiceFDStore ServiceFDStore;
 
-#include "unit.h"
 #include "path.h"
 #include "ratelimit.h"
 #include "kill.h"
 #include "exit-status.h"
-#include "failure-action.h"
 
 typedef enum ServiceState {
         SERVICE_DEAD,
@@ -190,6 +188,8 @@ struct Service {
         bool bus_name_good:1;
         bool forbid_restart:1;
         bool start_timeout_defined:1;
+
+        bool reset_cpu_usage:1;
 
         char *bus_name;
 

@@ -32,8 +32,6 @@
 #include "unit.h"
 #include "automount.h"
 #include "mount.h"
-#include "load-fragment.h"
-#include "load-dropin.h"
 #include "unit-name.h"
 #include "special.h"
 #include "label.h"
@@ -235,7 +233,7 @@ static void automount_set_state(Automount *a, AutomountState state) {
         unit_notify(UNIT(a), state_translation_table[old_state], state_translation_table[state], true);
 }
 
-static int automount_coldplug(Unit *u) {
+static int automount_coldplug(Unit *u, Hashmap *deferred_work) {
         Automount *a = AUTOMOUNT(u);
         int r;
 
@@ -727,7 +725,6 @@ static bool automount_check_gc(Unit *u) {
 static int automount_dispatch_io(sd_event_source *s, int fd, uint32_t events, void *userdata) {
         union autofs_v5_packet_union packet;
         Automount *a = AUTOMOUNT(userdata);
-        ssize_t l;
         int r;
 
         assert(a);
@@ -738,12 +735,9 @@ static int automount_dispatch_io(sd_event_source *s, int fd, uint32_t events, vo
                 goto fail;
         }
 
-        l = loop_read(a->pipe_fd, &packet, sizeof(packet), true);
-        if (l != sizeof(packet)) {
-                if (l < 0)
-                        log_unit_error_errno(UNIT(a)->id, l, "Invalid read from pipe: %m");
-                else
-                        log_unit_error(UNIT(a)->id, "Invalid read from pipe: short read");
+        r = loop_read_exact(a->pipe_fd, &packet, sizeof(packet), true);
+        if (r < 0) {
+                log_unit_error_errno(UNIT(a)->id, r, "Invalid read from pipe: %m");
                 goto fail;
         }
 

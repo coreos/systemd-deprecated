@@ -23,11 +23,9 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <getopt.h>
 #include <signal.h>
-#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/mount.h>
@@ -40,14 +38,12 @@
 #endif
 
 #include "sd-daemon.h"
-#include "sd-messages.h"
 #include "sd-bus.h"
 #include "log.h"
 #include "fdset.h"
 #include "special.h"
 #include "conf-parser.h"
 #include "missing.h"
-#include "label.h"
 #include "pager.h"
 #include "build.h"
 #include "strv.h"
@@ -55,7 +51,6 @@
 #include "virt.h"
 #include "architecture.h"
 #include "watchdog.h"
-#include "path-util.h"
 #include "switch-root.h"
 #include "capability.h"
 #include "killall.h"
@@ -161,7 +156,7 @@ noreturn static void crash(int sig) {
                         setrlimit(RLIMIT_CORE, &rl);
 
                         /* Just to be sure... */
-                        chdir("/");
+                        (void) chdir("/");
 
                         /* Raise the signal again */
                         pid = raw_getpid();
@@ -280,10 +275,10 @@ static int parse_proc_cmdline_item(const char *key, const char *value) {
                 "s",         SPECIAL_RESCUE_TARGET,
                 "S",         SPECIAL_RESCUE_TARGET,
                 "1",         SPECIAL_RESCUE_TARGET,
-                "2",         SPECIAL_RUNLEVEL2_TARGET,
-                "3",         SPECIAL_RUNLEVEL3_TARGET,
-                "4",         SPECIAL_RUNLEVEL4_TARGET,
-                "5",         SPECIAL_RUNLEVEL5_TARGET,
+                "2",         SPECIAL_MULTI_USER_TARGET,
+                "3",         SPECIAL_MULTI_USER_TARGET,
+                "4",         SPECIAL_MULTI_USER_TARGET,
+                "5",         SPECIAL_GRAPHICAL_TARGET,
         };
         int r;
 
@@ -1537,11 +1532,11 @@ int main(int argc, char *argv[]) {
 
                 detect_virtualization(&virtualization);
                 if (virtualization)
-                        log_info("Detected virtualization '%s'.", virtualization);
+                        log_info("Detected virtualization %s.", virtualization);
 
                 write_container_id();
 
-                log_info("Detected architecture '%s'.", architecture_to_string(uname_architecture()));
+                log_info("Detected architecture %s.", architecture_to_string(uname_architecture()));
 
                 if (in_initrd())
                         log_info("Running in initial RAM disk.");
@@ -1566,7 +1561,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (arg_running_as == SYSTEMD_SYSTEM && !skip_setup) {
-                if (arg_show_status > 0 || plymouth_running())
+                if (arg_show_status > 0)
                         status_welcome();
 
                 hostname_setup();

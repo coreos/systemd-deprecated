@@ -34,10 +34,6 @@
 #include "unit.h"
 #include "unit-name.h"
 #include "special.h"
-#include "exit-status.h"
-#include "def.h"
-#include "env-util.h"
-#include "fileio.h"
 #include "hashmap.h"
 
 typedef enum RunlevelType {
@@ -51,11 +47,11 @@ static const struct {
         const RunlevelType type;
 } rcnd_table[] = {
         /* Standard SysV runlevels for start-up */
-        { "rc1.d",  SPECIAL_RESCUE_TARGET,    RUNLEVEL_UP },
-        { "rc2.d",  SPECIAL_RUNLEVEL2_TARGET, RUNLEVEL_UP },
-        { "rc3.d",  SPECIAL_RUNLEVEL3_TARGET, RUNLEVEL_UP },
-        { "rc4.d",  SPECIAL_RUNLEVEL4_TARGET, RUNLEVEL_UP },
-        { "rc5.d",  SPECIAL_RUNLEVEL5_TARGET, RUNLEVEL_UP },
+        { "rc1.d",  SPECIAL_RESCUE_TARGET,     RUNLEVEL_UP },
+        { "rc2.d",  SPECIAL_MULTI_USER_TARGET, RUNLEVEL_UP },
+        { "rc3.d",  SPECIAL_MULTI_USER_TARGET, RUNLEVEL_UP },
+        { "rc4.d",  SPECIAL_MULTI_USER_TARGET, RUNLEVEL_UP },
+        { "rc5.d",  SPECIAL_GRAPHICAL_TARGET,  RUNLEVEL_UP },
 
         /* Standard SysV runlevels for shutdown */
         { "rc0.d",  SPECIAL_POWEROFF_TARGET,  RUNLEVEL_DOWN },
@@ -166,7 +162,7 @@ static int generate_unit_file(SysvStub *s) {
         /* We might already have a symlink with the same name from a Provides:,
          * or from backup files like /etc/init.d/foo.bak. Real scripts always win,
          * so remove an existing link */
-        if (is_symlink(unit)) {
+        if (is_symlink(unit) > 0) {
                 log_warning("Overwriting existing symlink %s with real service", unit);
                 (void) unlink(unit);
         }
@@ -723,10 +719,10 @@ static int fix_order(SysvStub *s, Hashmap *all_services) {
         return 0;
 }
 
-static int enumerate_sysv(LookupPaths lp, Hashmap *all_services) {
+static int enumerate_sysv(const LookupPaths *lp, Hashmap *all_services) {
         char **path;
 
-        STRV_FOREACH(path, lp.sysvinit_path) {
+        STRV_FOREACH(path, lp->sysvinit_path) {
                 _cleanup_closedir_ DIR *d = NULL;
                 struct dirent *de;
 
@@ -768,7 +764,7 @@ static int enumerate_sysv(LookupPaths lp, Hashmap *all_services) {
                         if (!fpath)
                                 return log_oom();
 
-                        if (unit_file_get_state(UNIT_FILE_SYSTEM, NULL, name) >= 0) {
+                        if (unit_file_lookup_state(UNIT_FILE_SYSTEM, NULL, lp, name) >= 0) {
                                 log_debug("Native unit for %s already exists, skipping", name);
                                 continue;
                         }
@@ -793,7 +789,7 @@ static int enumerate_sysv(LookupPaths lp, Hashmap *all_services) {
         return 0;
 }
 
-static int set_dependencies_from_rcnd(LookupPaths lp, Hashmap *all_services) {
+static int set_dependencies_from_rcnd(const LookupPaths *lp, Hashmap *all_services) {
         char **p;
         unsigned i;
         _cleanup_closedir_ DIR *d = NULL;
@@ -804,7 +800,7 @@ static int set_dependencies_from_rcnd(LookupPaths lp, Hashmap *all_services) {
         _cleanup_set_free_ Set *shutdown_services = NULL;
         int r = 0;
 
-        STRV_FOREACH(p, lp.sysvrcnd_path)
+        STRV_FOREACH(p, lp->sysvrcnd_path)
                 for (i = 0; i < ELEMENTSOF(rcnd_table); i ++) {
                         struct dirent *de;
 
@@ -954,13 +950,13 @@ int main(int argc, char *argv[]) {
                 return EXIT_FAILURE;
         }
 
-        r = enumerate_sysv(lp, all_services);
+        r = enumerate_sysv(&lp, all_services);
         if (r < 0) {
                 log_error("Failed to generate units for all init scripts.");
                 return EXIT_FAILURE;
         }
 
-        r = set_dependencies_from_rcnd(lp, all_services);
+        r = set_dependencies_from_rcnd(&lp, all_services);
         if (r < 0) {
                 log_error("Failed to read runlevels from rcnd links.");
                 return EXIT_FAILURE;

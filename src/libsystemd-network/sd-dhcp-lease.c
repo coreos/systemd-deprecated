@@ -22,22 +22,15 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <net/ethernet.h>
 #include <arpa/inet.h>
-#include <sys/param.h>
 
-#include "util.h"
-#include "list.h"
-#include "mkdir.h"
 #include "fileio.h"
 #include "unaligned.h"
 #include "in-addr-util.h"
 
 #include "dhcp-protocol.h"
-#include "dhcp-internal.h"
 #include "dhcp-lease-internal.h"
 #include "sd-dhcp-lease.h"
-#include "sd-dhcp-client.h"
 #include "network-internal.h"
 
 int sd_dhcp_lease_get_address(sd_dhcp_lease *lease, struct in_addr *addr) {
@@ -511,7 +504,7 @@ int dhcp_lease_parse_options(uint8_t code, uint8_t len, const uint8_t *option,
                 if (e)
                         *e = 0;
 
-                if (!hostname_is_valid(domainname) || is_localhost(domainname))
+                if (!domainname_is_valid(domainname) || is_localhost(domainname))
                         break;
 
                 free(lease->domainname);

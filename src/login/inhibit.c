@@ -20,7 +20,6 @@
 ***/
 
 #include <getopt.h>
-#include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -260,7 +259,7 @@ int main(int argc, char *argv[]) {
 
                 fd = inhibit(bus, &error);
                 if (fd < 0) {
-                        log_error("Failed to inhibit: %s", bus_error_message(&error, -r));
+                        log_error("Failed to inhibit: %s", bus_error_message(&error, fd));
                         return EXIT_FAILURE;
                 }
 

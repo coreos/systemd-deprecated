@@ -25,23 +25,15 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <sched.h>
-#include <sys/syscall.h>
-#include <limits.h>
 #include <linux/fs.h>
-#include <sys/file.h>
 
 #include "strv.h"
 #include "util.h"
 #include "path-util.h"
 #include "missing.h"
-#include "execute.h"
 #include "loopback-setup.h"
-#include "mkdir.h"
 #include "dev-setup.h"
-#include "def.h"
-#include "label.h"
 #include "selinux-util.h"
 #include "namespace.h"
 
@@ -91,9 +83,11 @@ static int append_mounts(BindMount **p, char **strv, MountMode mode) {
 
 static int mount_path_compare(const void *a, const void *b) {
         const BindMount *p = a, *q = b;
+        int d;
 
-        if (path_equal(p->path, q->path)) {
+        d = path_compare(p->path, q->path);
 
+        if (!d) {
                 /* If the paths are equal, check the mode */
                 if (p->mode < q->mode)
                         return -1;
@@ -105,13 +99,7 @@ static int mount_path_compare(const void *a, const void *b) {
         }
 
         /* If the paths are not equal, then order prefixes first */
-        if (path_startswith(p->path, q->path))
-                return 1;
-
-        if (path_startswith(q->path, p->path))
-                return -1;
-
-        return 0;
+        return d;
 }
 
 static void drop_duplicates(BindMount *m, unsigned *n) {
@@ -158,24 +146,27 @@ static int mount_dev(BindMount *m) {
                 return -errno;
 
         dev = strjoina(temporary_mount, "/dev");
-        (void)mkdir(dev, 0755);
+        (void) mkdir(dev, 0755);
         if (mount("tmpfs", dev, "tmpfs", MS_NOSUID|MS_STRICTATIME, "mode=755") < 0) {
                 r = -errno;
                 goto fail;
         }
 
         devpts = strjoina(temporary_mount, "/dev/pts");
-        (void)mkdir(devpts, 0755);
+        (void) mkdir(devpts, 0755);
         if (mount("/dev/pts", devpts, NULL, MS_BIND, NULL) < 0) {
                 r = -errno;
                 goto fail;
         }
 
         devptmx = strjoina(temporary_mount, "/dev/ptmx");
-        symlink("pts/ptmx", devptmx);
+        if (symlink("pts/ptmx", devptmx) < 0) {
+                r = -errno;
+                goto fail;
+        }
 
         devshm = strjoina(temporary_mount, "/dev/shm");
-        (void)mkdir(devshm, 01777);
+        (void) mkdir(devshm, 01777);
         r = mount("/dev/shm", devshm, NULL, MS_BIND, NULL);
         if (r < 0) {
                 r = -errno;
@@ -183,15 +174,15 @@ static int mount_dev(BindMount *m) {
         }
 
         devmqueue = strjoina(temporary_mount, "/dev/mqueue");
-        (void)mkdir(devmqueue, 0755);
-        mount("/dev/mqueue", devmqueue, NULL, MS_BIND, NULL);
+        (void) mkdir(devmqueue, 0755);
+        (void) mount("/dev/mqueue", devmqueue, NULL, MS_BIND, NULL);
 
         devhugepages = strjoina(temporary_mount, "/dev/hugepages");
-        (void)mkdir(devhugepages, 0755);
-        mount("/dev/hugepages", devhugepages, NULL, MS_BIND, NULL);
+        (void) mkdir(devhugepages, 0755);
+        (void) mount("/dev/hugepages", devhugepages, NULL, MS_BIND, NULL);
 
         devlog = strjoina(temporary_mount, "/dev/log");
-        symlink("/run/systemd/journal/dev-log", devlog);
+        (void) symlink("/run/systemd/journal/dev-log", devlog);
 
         NULSTR_FOREACH(d, devnodes) {
                 _cleanup_free_ char *dn = NULL;
@@ -281,7 +272,7 @@ static int mount_kdbus(BindMount *m) {
                 return log_error_errno(errno, "Failed create temp dir: %m");
 
         root = strjoina(temporary_mount, "/kdbus");
-        (void)mkdir(root, 0755);
+        (void) mkdir(root, 0755);
         if (mount("tmpfs", root, "tmpfs", MS_NOSUID|MS_STRICTATIME, "mode=777") < 0) {
                 r = -errno;
                 goto fail;
@@ -532,7 +523,7 @@ fail:
         if (n > 0) {
                 for (m = mounts; m < mounts + n; ++m)
                         if (m->done)
-                                umount2(m->path, MNT_DETACH);
+                                (void) umount2(m->path, MNT_DETACH);
         }
 
         return r;

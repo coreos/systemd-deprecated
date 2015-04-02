@@ -20,7 +20,6 @@
 ***/
 
 #include <sys/epoll.h>
-#include <sys/timerfd.h>
 #include <errno.h>
 #include <unistd.h>
 
@@ -44,7 +43,7 @@
 #include "bus-internal.h"
 #include "selinux-access.h"
 
-#define CONNECTIONS_MAX 512
+#define CONNECTIONS_MAX 4096
 
 static void destroy_bus(Manager *m, sd_bus **bus);
 
@@ -89,15 +88,19 @@ static int signal_agent_released(sd_bus *bus, sd_bus_message *message, void *use
 
         manager_notify_cgroup_empty(m, cgroup);
 
-        if (m->running_as == SYSTEMD_SYSTEM && m->system_bus) {
-                /* If we are running as system manager, forward the
-                 * message to the system bus */
+        /* only forward to system bus if running as system instance */
+        if (m->running_as != SYSTEMD_SYSTEM || !m->system_bus)
+                return 0;
 
-                r = sd_bus_send(m->system_bus, message, NULL);
-                if (r < 0)
-                        log_warning_errno(r, "Failed to forward Released message: %m");
-        }
+        r = sd_bus_message_rewind(message, 1);
+        if (r < 0)
+                goto exit;
 
+        r = sd_bus_send(m->system_bus, message, NULL);
+
+exit:
+        if (r < 0)
+                log_warning_errno(r, "Failed to forward Released message: %m");
         return 0;
 }
 
@@ -849,22 +852,19 @@ static int bus_setup_system(Manager *m, sd_bus *bus) {
         assert(m);
         assert(bus);
 
-        if (m->running_as == SYSTEMD_SYSTEM)
-                return 0;
-
-        /* If we are a user instance we get the Released message via
-         * the system bus */
-        r = sd_bus_add_match(
-                        bus,
-                        NULL,
-                        "type='signal',"
-                        "interface='org.freedesktop.systemd1.Agent',"
-                        "member='Released',"
-                        "path='/org/freedesktop/systemd1/agent'",
-                        signal_agent_released, m);
-
-        if (r < 0)
-                log_warning_errno(r, "Failed to register Released match on system bus: %m");
+        /* On kdbus or if we are a user instance we get the Released message via the system bus */
+        if (m->running_as == SYSTEMD_USER || m->kdbus_fd >= 0) {
+                r = sd_bus_add_match(
+                                bus,
+                                NULL,
+                                "type='signal',"
+                                "interface='org.freedesktop.systemd1.Agent',"
+                                "member='Released',"
+                                "path='/org/freedesktop/systemd1/agent'",
+                                signal_agent_released, m);
+                if (r < 0)
+                        log_warning_errno(r, "Failed to register Released match on system bus: %m");
+        }
 
         log_debug("Successfully connected to system bus.");
         return 0;
@@ -1192,19 +1192,23 @@ int bus_track_coldplug(Manager *m, sd_bus_track **t, char ***l) {
         return r;
 }
 
-int bus_verify_manage_unit_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
-        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.manage-units", false, &m->polkit_registry, error);
+int bus_verify_manage_units_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
+        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.manage-units", false, UID_INVALID, &m->polkit_registry, error);
 }
 
 /* Same as bus_verify_manage_unit_async(), but checks for CAP_KILL instead of CAP_SYS_ADMIN */
-int bus_verify_manage_unit_async_for_kill(Manager *m, sd_bus_message *call, sd_bus_error *error) {
-        return bus_verify_polkit_async(call, CAP_KILL, "org.freedesktop.systemd1.manage-units", false, &m->polkit_registry, error);
+int bus_verify_manage_units_async_for_kill(Manager *m, sd_bus_message *call, sd_bus_error *error) {
+        return bus_verify_polkit_async(call, CAP_KILL, "org.freedesktop.systemd1.manage-units", false, UID_INVALID, &m->polkit_registry, error);
 }
 
 int bus_verify_manage_unit_files_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
-        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.manage-unit-files", false, &m->polkit_registry, error);
+        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.manage-unit-files", false, UID_INVALID, &m->polkit_registry, error);
 }
 
 int bus_verify_reload_daemon_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
-        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.reload-daemon", false, &m->polkit_registry, error);
+        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.reload-daemon", false, UID_INVALID, &m->polkit_registry, error);
+}
+
+int bus_verify_set_environment_async(Manager *m, sd_bus_message *call, sd_bus_error *error) {
+        return bus_verify_polkit_async(call, CAP_SYS_ADMIN, "org.freedesktop.systemd1.set-environment", false, UID_INVALID, &m->polkit_registry, error);
 }

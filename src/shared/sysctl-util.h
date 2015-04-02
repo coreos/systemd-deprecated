@@ -5,7 +5,7 @@
 /***
   This file is part of systemd.
 
-  Copyright 2013 Kay Sievers
+  Copyright 2011 Lennart Poettering
 
   systemd is free software; you can redistribute it and/or modify it
   under the terms of the GNU Lesser General Public License as published by
@@ -21,7 +21,7 @@
   along with systemd; If not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#include "boot.h"
+char *sysctl_normalize(char *s);
+int sysctl_read(const char *property, char **value);
+int sysctl_write(const char *property, const char *value);
 
-int boot_loader_read_entries(struct boot_info *info);
-int boot_loader_find_active_entry(struct boot_info *info, const char *loader_active);

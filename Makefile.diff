@@ -1,0 +1,29 @@
+869c869
+< #am__append_147 = \
+---
+> am__append_147 = \
+5161c5161
+< GLIB_LIBS = -L/home/raghavan/foundation/systemd/buildroot/output/target/usr/lib -lgio-2.0 -lgobject-2.0 -lglib-2.0  
+---
+> GLIB_LIBS = -lgio-2.0 -lgobject-2.0 -lglib-2.0  
+5195c5195
+< LDFLAGS = -luuid
+---
+> LDFLAGS = 
+5199c5199
+< LIBCURL_LIBS = -L/home/raghavan/foundation/systemd/buildroot/output/target/usr/lib -lcurl  
+---
+> LIBCURL_LIBS = -lcurl  
+5204c5204
+< LIBIDN_LIBS = -L/home/raghavan/foundation/systemd/buildroot/output/target/usr/lib -lidn  
+---
+> LIBIDN_LIBS = -lidn  
+5249,5252c5249,5250
+< #PYTHON_DEVEL_CFLAGS = -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu/python2.7  
+< #PYTHON_DEVEL_LIBS = -lpython2.7  
+< PYTHON_DEVEL_CFLAGS = -I/home/raghavan/foundation/systemd/buildroot/output/host/usr/aarch64-buildroot-linux-gnu/sysroot/usr/include/python3.4m -L/home/raghavan/foundation/systemd/buildroot/output/host/usr/aarch64-buildroot-linux-gnu/sysroot/usr/lib/python3.4 -L/home/raghavan/foundation/systemd/buildroot/output/host/usr/aarch64-buildroot-linux-gnu/sysroot/usr/lib
+< PYTHON_DEVEL_LIBS = -lpython3.4m
+---
+> PYTHON_DEVEL_CFLAGS = -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu/python2.7  
+> PYTHON_DEVEL_LIBS = -lpython2.7  
+

@@ -129,6 +129,9 @@ typedef struct Partition {
         char *node;
         int index;
         bool read_only;
+        bool successful;
+        uint8_t tries;
+        uint8_t priority;
 } Partition;
 
 static void partition_free(Partition *p);
@@ -2797,6 +2800,8 @@ static Partition* partition_new(const char *node, int index, uint64_t flags) {
         p->index = index;
         p->read_only = !!(flags & GPT_FLAG_READ_ONLY);
         p->successful = !!(flags & GPT_FLAG_SUCCESSFUL);
+        p->tries = gpt_flag_tries(flags);
+        p->priority = gpt_flag_priority(flags);
 
         return p;
 }
@@ -2808,6 +2813,40 @@ static void partition_free(Partition *p) {
 
         free(p->node);
         free(p);
+}
+
+/* Optionally replace p with a higher priority partition.
+ * Partitions with priority selection enabled:
+ *  - tries or successful must be non-zero
+ *  - the partition with the highest priority is selected
+ *  - for equal priorities the first (lowest index) is selected
+ * Otherwise, new partitions with a zero priority:
+ *  - the first (lowest index) is selected
+ * This function assumes the partitions it is comparing have the same type.
+ */
+static int partition_prioritize(Partition **p, const char *node, int index, uint64_t flags) {
+
+        _cleanup_partition_free_ Partition *t = NULL;
+
+        assert(!(flags & GPT_FLAG_NO_AUTO));
+
+        t = partition_new(node, index, flags);
+        if (!t)
+                return log_oom();
+
+        if (t->priority && !(t->tries || t->successful))
+                return 0;
+
+        if (*p && (*p)->priority > t->priority)
+                return 0;
+
+        if (*p && (*p)->priority == t->priority && (*p)->index <= t->index)
+                return 0;
+
+        partition_free(*p);
+        *p = t;
+        t = NULL;
+        return 0;
 }
 
 #define PARTITION_TABLE_BLURB \
@@ -3072,49 +3111,33 @@ static int dissect_image(
 #ifdef GPT_ROOT_NATIVE
                         else if (sd_id128_equal(type_id, GPT_ROOT_NATIVE)) {
 
-                                if (root && nr >= root->index)
-                                        continue;
-
-                                partition_free(root);
-                                root = partition_new(node, nr, flags);
-                                if (!root)
-                                        return log_oom();
+                                r = partition_prioritize(&root, node, nr, flags);
+                                if (r < 0)
+                                        return r;
                         }
 #endif
 #ifdef GPT_ROOT_SECONDARY
                         else if (sd_id128_equal(type_id, GPT_ROOT_SECONDARY)) {
 
-                                if (secondary_root && nr >= secondary_root->index)
-                                        continue;
-
-                                partition_free(secondary_root);
-                                secondary_root = partition_new(node, nr, flags);
-                                if (!secondary_root)
-                                        return log_oom();
+                                r = partition_prioritize(&secondary_root, node, nr, flags);
+                                if (r < 0)
+                                        return r;
                         }
 #endif
 #ifdef GPT_USR_NATIVE
                         else if (sd_id128_equal(type_id, GPT_USR_NATIVE)) {
 
-                                if (usr && nr >= usr->index)
-                                        continue;
-
-                                partition_free(usr);
-                                usr = partition_new(node, nr, flags);
-                                if (!usr)
-                                        return log_oom();
+                                r = partition_prioritize(&usr, node, nr, flags);
+                                if (r < 0)
+                                        return r;
                         }
 #endif
 #ifdef GPT_USR_SECONDARY
                         else if (sd_id128_equal(type_id, GPT_USR_SECONDARY)) {
 
-                                if (secondary_usr && nr >= secondary_usr->index)
-                                        continue;
-
-                                partition_free(secondary_usr);
-                                secondary_usr = partition_new(node, nr, flags);
-                                if (!secondary_usr)
-                                        return log_oom();
+                                r = partition_prioritize(&secondary_usr, node, nr, flags);
+                                if (r < 0)
+                                        return r;
                         }
 #endif
                         else if (sd_id128_equal(type_id, GPT_LINUX_GENERIC)) {

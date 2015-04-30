@@ -22,6 +22,7 @@
 #pragma once
 
 #include <endian.h>
+#include <stdint.h>
 
 #include "sd-id128.h"
 
@@ -70,5 +71,21 @@
  * just because we saw no point in defining any other values here. */
 #define GPT_FLAG_READ_ONLY (1ULL << 60)
 #define GPT_FLAG_NO_AUTO (1ULL << 63)
+
+/* Flags for prioritizing multiple ROOT or USR partitions of the same type.
+ * SUCCESSFUL is a single bit while TRIES and PRIORITY are 4 bits each. */
+#define GPT_FLAG_SUCCESSFUL (1ULL << 56)
+#define GPT_FLAG_TRIES_OFFSET 52
+#define GPT_FLAG_TRIES_MAX 15ULL
+#define GPT_FLAG_PRIORITY_OFFSET 48
+#define GPT_FLAG_PRIORITY_MAX 15ULL
+
+static inline uint8_t gpt_flag_tries(uint64_t flags) {
+        return (uint8_t)((flags >> GPT_FLAG_TRIES_OFFSET) & GPT_FLAG_TRIES_MAX);
+}
+
+static inline uint8_t gpt_flag_priority(uint64_t flags) {
+        return (uint8_t)((flags >> GPT_FLAG_PRIORITY_OFFSET) & GPT_FLAG_PRIORITY_MAX);
+}
 
 #define GPT_LINUX_GENERIC SD_ID128_MAKE(0f,c6,3d,af,84,83,47,72,8e,79,3d,69,d8,47,7d,e4)

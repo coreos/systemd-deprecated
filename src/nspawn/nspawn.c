@@ -52,6 +52,10 @@
 #include <blkid/blkid.h>
 #endif
 
+#ifdef HAVE_LIBFDISK
+#include <libfdisk/libfdisk.h>
+#endif
+
 #include "random-util.h"
 #include "sd-daemon.h"
 #include "sd-bus.h"
@@ -137,6 +141,11 @@ typedef struct Partition {
 static void partition_free(Partition *p);
 DEFINE_TRIVIAL_CLEANUP_FUNC(Partition*, partition_free);
 #define _cleanup_partition_free_ _cleanup_(partition_freep)
+
+#ifdef HAVE_LIBFDISK
+DEFINE_TRIVIAL_CLEANUP_FUNC(struct fdisk_context*, fdisk_unref_context);
+#define _cleanup_fdisk_unref_context_ _cleanup_(fdisk_unref_contextp)
+#endif
 
 static char *arg_directory = NULL;
 static char *arg_template = NULL;
@@ -2849,6 +2858,80 @@ static int partition_prioritize(Partition **p, const char *node, int index, uint
         return 0;
 }
 
+static int partition_decrement_tries(Partition *p, const char *disk_device) {
+
+#ifdef HAVE_LIBFDISK
+        _cleanup_fdisk_unref_context_ struct fdisk_context *cxt = NULL;
+        const uint64_t mask = GPT_FLAG_TRIES_MAX << GPT_FLAG_TRIES_OFFSET;
+        uint64_t attrs;
+        int r = 0;
+#endif
+
+        if (!p || !disk_device)
+                return 0;
+
+        assert(p->tries <= GPT_FLAG_TRIES_MAX);
+
+        if (arg_read_only)
+                return 0;
+
+        if (!p->priority || !p->tries)
+                return 0;
+
+#ifdef HAVE_LIBFDISK
+        fdisk_init_debug(0);
+        cxt = fdisk_new_context();
+        if (!cxt)
+                return log_oom();
+
+        r = fdisk_assign_device(cxt, disk_device, 0);
+        if (r < 0) {
+                return r;
+        }
+
+        /* Currently GPT is always the first label in cxt so this loop
+         * is just here in case that ever happens to change.  */
+        while (!fdisk_is_label(cxt, GPT)) {
+                struct fdisk_label *lb = NULL;
+                r = fdisk_next_label(cxt, &lb);
+                if (r < 0)
+                        return r;
+                if (r > 0)
+                        return -EINVAL;
+        }
+
+        /* Of course libblkid starts at 1, libfdisk starts at 0. */
+        r = fdisk_gpt_get_partition_attrs(cxt, p->index-1, &attrs);
+        if (r < 0)
+                return r;
+
+        p->tries--;
+        attrs = (attrs & ~mask) |
+                (((uint64_t)p->tries) << GPT_FLAG_TRIES_OFFSET);
+
+        r = fdisk_gpt_set_partition_attrs(cxt, p->index-1, attrs);
+        if (r < 0)
+                return r;
+
+        log_debug("Setting tries for partition %d on %s to %u.",
+                        p->index, disk_device, p->tries);
+        r = fdisk_write_disklabel(cxt);
+        if (r < 0)
+                return r;
+
+        /* Using deassign_device before unref_context ensures that both
+         * fsync() and close() are called successfully. */
+        r = fdisk_deassign_device(cxt, 0);
+        if (r < 0)
+                return r;
+
+        return 0;
+#else
+        log_error("GPT 'tries' attribute not supported, compiled without fdisk support.");
+        return -EOPNOTSUPP;
+#endif
+}
+
 #define PARTITION_TABLE_BLURB \
         "Note that the disk image needs to either contain only a single MBR partition of\n" \
         "type 0x83 that is marked bootable, or a single GPT partition of type " \
@@ -4134,6 +4217,20 @@ int main(int argc, char *argv[]) {
                          * propagate mounts to the real root. */
                         if (mount(NULL, "/", NULL, MS_SLAVE|MS_REC, NULL) < 0) {
                                 log_error_errno(errno, "MS_SLAVE|MS_REC failed: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        /* Prior to mounting mark any priority based partitions
+                         * as tried so subsequent boots recognize failures. */
+                        r = partition_decrement_tries(root_device, device_path);
+                        if (r < 0) {
+                                log_error_errno(errno, "Updating root 'tries' attribute failed: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        r = partition_decrement_tries(usr_device, device_path);
+                        if (r < 0) {
+                                log_error_errno(errno, "Updating usr 'tries' attribute failed: %m");
                                 _exit(EXIT_FAILURE);
                         }
 

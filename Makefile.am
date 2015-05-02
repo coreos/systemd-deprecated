@@ -2830,14 +2830,16 @@ systemd_nspawn_SOURCES = \
 systemd_nspawn_CFLAGS = \
 	$(AM_CFLAGS) \
 	$(SECCOMP_CFLAGS) \
-	$(BLKID_CFLAGS)
+	$(BLKID_CFLAGS) \
+	$(LIBFDISK_CFLAGS)
 
 systemd_nspawn_LDADD = \
 	libsystemd-label.la \
 	libudev-internal.la \
 	libsystemd-internal.la \
 	libsystemd-shared.la \
-	$(BLKID_LIBS)
+	$(BLKID_LIBS) \
+	$(LIBFDISK_LIBS)
 
 if HAVE_SECCOMP
 systemd_nspawn_LDADD += \

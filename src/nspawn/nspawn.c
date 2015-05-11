@@ -1431,71 +1431,81 @@ static int setup_boot_id(const char *dest) {
         return r;
 }
 
-static int copy_devnodes(const char *dest) {
+static int copy_devnode(const char *dest, const char *from) {
 
-        static const char devnodes[] =
-                "null\0"
-                "zero\0"
-                "full\0"
-                "random\0"
-                "urandom\0"
-                "tty\0"
-                "net/tun\0";
-
-        const char *d;
-        int r = 0;
         _cleanup_umask_ mode_t u;
+        _cleanup_free_ char *to = NULL;
+        struct stat st;
+        int r;
 
         assert(dest);
+        assert(from);
 
         u = umask(0000);
 
-        NULSTR_FOREACH(d, devnodes) {
-                _cleanup_free_ char *from = NULL, *to = NULL;
-                struct stat st;
+        to = strappend(dest, from);
+        if (!to)
+                return log_oom();
 
-                from = strappend("/dev/", d);
-                to = strjoin(dest, "/dev/", d, NULL);
-                if (!from || !to)
-                        return log_oom();
+        if (stat(from, &st) < 0) {
 
-                if (stat(from, &st) < 0) {
+                if (errno != ENOENT)
+                        return log_error_errno(errno, "Failed to stat %s: %m", from);
 
-                        if (errno != ENOENT)
-                                return log_error_errno(errno, "Failed to stat %s: %m", from);
+        } else if (!S_ISCHR(st.st_mode) && !S_ISBLK(st.st_mode)) {
 
-                } else if (!S_ISCHR(st.st_mode) && !S_ISBLK(st.st_mode)) {
+                log_error("%s is not a char or block device, cannot copy", from);
+                return -EIO;
 
-                        log_error("%s is not a char or block device, cannot copy", from);
-                        return -EIO;
-
-                } else {
-                        r = mkdir_parents(to, 0775);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to create parent directory of %s: %m", to);
-                                return -r;
-                        }
-
-                        if (mknod(to, st.st_mode, st.st_rdev) < 0) {
-                                if (errno != EPERM)
-                                        return log_error_errno(errno, "mknod(%s) failed: %m", to);
-
-                                /* Some systems abusively restrict mknod but
-                                 * allow bind mounts. */
-                                r = touch(to);
-                                if (r < 0)
-                                        return log_error_errno(r, "touch (%s) failed: %m", to);
-                                if (mount(from, to, NULL, MS_BIND, NULL) < 0)
-                                        return log_error_errno(errno, "Both mknod and bind mount (%s) failed: %m", to);
-                        }
-
-                        if (arg_userns && arg_uid_shift != UID_INVALID)
-                                if (lchown(to, arg_uid_shift, arg_uid_shift) < 0)
-                                        return log_error_errno(errno, "chown() of device node %s failed: %m", to);
+        } else {
+                r = mkdir_parents(to, 0775);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to create parent directory of %s: %m", to);
+                        return -r;
                 }
+
+                if (mknod(to, st.st_mode, st.st_rdev) < 0) {
+                        if (errno != EPERM)
+                                return log_error_errno(errno, "mknod(%s) failed: %m", to);
+
+                        /* Some systems abusively restrict mknod but
+                         * allow bind mounts. */
+                        r = touch(to);
+                        if (r < 0)
+                                return log_error_errno(r, "touch (%s) failed: %m", to);
+                        if (mount(from, to, NULL, MS_BIND, NULL) < 0)
+                                return log_error_errno(errno, "Both mknod and bind mount (%s) failed: %m", to);
+                }
+
+                if (arg_userns && arg_uid_shift != UID_INVALID)
+                        if (lchown(to, arg_uid_shift, arg_uid_shift) < 0)
+                                return log_error_errno(errno, "chown() of device node %s failed: %m", to);
         }
 
-        return r;
+        return 0;
+}
+
+static int copy_devnodes(const char *dest) {
+
+        static const char devnodes[] =
+                "/dev/null\0"
+                "/dev/zero\0"
+                "/dev/full\0"
+                "/dev/random\0"
+                "/dev/urandom\0"
+                "/dev/tty\0"
+                "/dev/net/tun\0";
+
+        const char *d;
+        int r;
+
+        NULSTR_FOREACH(d, devnodes) {
+                r = copy_devnode(dest, d);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
 }
 
 static int setup_ptmx(const char *dest) {

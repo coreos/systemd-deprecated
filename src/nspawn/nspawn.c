@@ -52,6 +52,10 @@
 #include <blkid/blkid.h>
 #endif
 
+#ifdef HAVE_LIBFDISK
+#include <libfdisk/libfdisk.h>
+#endif
+
 #include "random-util.h"
 #include "sd-daemon.h"
 #include "sd-bus.h"
@@ -124,6 +128,24 @@ typedef enum Volatile {
         VOLATILE_YES,
         VOLATILE_STATE,
 } Volatile;
+
+typedef struct Partition {
+        char *node;
+        int index;
+        bool read_only;
+        bool successful;
+        uint8_t tries;
+        uint8_t priority;
+} Partition;
+
+static void partition_free(Partition *p);
+DEFINE_TRIVIAL_CLEANUP_FUNC(Partition*, partition_free);
+#define _cleanup_partition_free_ _cleanup_(partition_freep)
+
+#ifdef HAVE_LIBFDISK
+DEFINE_TRIVIAL_CLEANUP_FUNC(struct fdisk_context*, fdisk_unref_context);
+#define _cleanup_fdisk_unref_context_ _cleanup_(fdisk_unref_contextp)
+#endif
 
 static char *arg_directory = NULL;
 static char *arg_template = NULL;
@@ -1409,71 +1431,117 @@ static int setup_boot_id(const char *dest) {
         return r;
 }
 
-static int copy_devnodes(const char *dest) {
+static int copy_devnode(const char *dest, const char *from) {
 
-        static const char devnodes[] =
-                "null\0"
-                "zero\0"
-                "full\0"
-                "random\0"
-                "urandom\0"
-                "tty\0"
-                "net/tun\0";
-
-        const char *d;
-        int r = 0;
         _cleanup_umask_ mode_t u;
+        _cleanup_free_ char *to = NULL;
+        struct stat st;
+        int r;
 
         assert(dest);
+        assert(from);
 
         u = umask(0000);
 
-        NULSTR_FOREACH(d, devnodes) {
-                _cleanup_free_ char *from = NULL, *to = NULL;
-                struct stat st;
+        to = strappend(dest, from);
+        if (!to)
+                return log_oom();
 
-                from = strappend("/dev/", d);
-                to = strjoin(dest, "/dev/", d, NULL);
-                if (!from || !to)
-                        return log_oom();
+        if (stat(from, &st) < 0) {
 
-                if (stat(from, &st) < 0) {
+                if (errno != ENOENT)
+                        return log_error_errno(errno, "Failed to stat %s: %m", from);
 
-                        if (errno != ENOENT)
-                                return log_error_errno(errno, "Failed to stat %s: %m", from);
+        } else if (!S_ISCHR(st.st_mode) && !S_ISBLK(st.st_mode)) {
 
-                } else if (!S_ISCHR(st.st_mode) && !S_ISBLK(st.st_mode)) {
+                log_error("%s is not a char or block device, cannot copy", from);
+                return -EIO;
 
-                        log_error("%s is not a char or block device, cannot copy", from);
-                        return -EIO;
-
-                } else {
-                        r = mkdir_parents(to, 0775);
-                        if (r < 0) {
-                                log_error_errno(r, "Failed to create parent directory of %s: %m", to);
-                                return -r;
-                        }
-
-                        if (mknod(to, st.st_mode, st.st_rdev) < 0) {
-                                if (errno != EPERM)
-                                        return log_error_errno(errno, "mknod(%s) failed: %m", to);
-
-                                /* Some systems abusively restrict mknod but
-                                 * allow bind mounts. */
-                                r = touch(to);
-                                if (r < 0)
-                                        return log_error_errno(r, "touch (%s) failed: %m", to);
-                                if (mount(from, to, NULL, MS_BIND, NULL) < 0)
-                                        return log_error_errno(errno, "Both mknod and bind mount (%s) failed: %m", to);
-                        }
-
-                        if (arg_userns && arg_uid_shift != UID_INVALID)
-                                if (lchown(to, arg_uid_shift, arg_uid_shift) < 0)
-                                        return log_error_errno(errno, "chown() of device node %s failed: %m", to);
+        } else {
+                r = mkdir_parents(to, 0775);
+                if (r < 0) {
+                        log_error_errno(r, "Failed to create parent directory of %s: %m", to);
+                        return -r;
                 }
+
+                if (mknod(to, st.st_mode, st.st_rdev) < 0) {
+                        if (errno != EPERM)
+                                return log_error_errno(errno, "mknod(%s) failed: %m", to);
+
+                        /* Some systems abusively restrict mknod but
+                         * allow bind mounts. */
+                        r = touch(to);
+                        if (r < 0)
+                                return log_error_errno(r, "touch (%s) failed: %m", to);
+                        if (mount(from, to, NULL, MS_BIND, NULL) < 0)
+                                return log_error_errno(errno, "Both mknod and bind mount (%s) failed: %m", to);
+                }
+
+                if (arg_userns && arg_uid_shift != UID_INVALID)
+                        if (lchown(to, arg_uid_shift, arg_uid_shift) < 0)
+                                return log_error_errno(errno, "chown() of device node %s failed: %m", to);
         }
 
-        return r;
+        return 0;
+}
+
+static int copy_devnodes(
+                const char *dest,
+                const char *disk_device,
+                const Partition *root_device,
+                const Partition *usr_device,
+                const Partition *home_device,
+                const Partition *srv_device) {
+
+        static const char devnodes[] =
+                "/dev/null\0"
+                "/dev/zero\0"
+                "/dev/full\0"
+                "/dev/random\0"
+                "/dev/urandom\0"
+                "/dev/tty\0"
+                "/dev/net/tun\0";
+
+        const char *d;
+        int r;
+
+        NULSTR_FOREACH(d, devnodes) {
+                r = copy_devnode(dest, d);
+                if (r < 0)
+                        return r;
+        }
+
+        if (disk_device) {
+                r = copy_devnode(dest, disk_device);
+                if (r < 0)
+                        return r;
+        }
+
+        if (root_device) {
+                r = copy_devnode(dest, root_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (usr_device) {
+                r = copy_devnode(dest, usr_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (home_device) {
+                r = copy_devnode(dest, home_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (srv_device) {
+                r = copy_devnode(dest, srv_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        return 0;
 }
 
 static int setup_ptmx(const char *dest) {
@@ -2767,6 +2835,149 @@ static int setup_image(char **device_path, int *loop_nr) {
         return r;
 }
 
+static Partition* partition_new(const char *node, int index, uint64_t flags) {
+        Partition *p;
+
+        /* As with libblkid, the partition numbers start at 1. */
+        assert(node);
+        assert(index > 0);
+
+        p = malloc(sizeof(Partition));
+        if (!p)
+                return NULL;
+
+        p->node = strdup(node);
+        if (!p->node) {
+                free(p);
+                return NULL;
+        }
+
+        p->index = index;
+        p->read_only = !!(flags & GPT_FLAG_READ_ONLY);
+        p->successful = !!(flags & GPT_FLAG_SUCCESSFUL);
+        p->tries = gpt_flag_tries(flags);
+        p->priority = gpt_flag_priority(flags);
+
+        return p;
+}
+
+static void partition_free(Partition *p) {
+
+        if (!p)
+                return;
+
+        free(p->node);
+        free(p);
+}
+
+/* Optionally replace p with a higher priority partition.
+ * Partitions with priority selection enabled:
+ *  - tries or successful must be non-zero
+ *  - the partition with the highest priority is selected
+ *  - for equal priorities the first (lowest index) is selected
+ * Otherwise, new partitions with a zero priority:
+ *  - the first (lowest index) is selected
+ * This function assumes the partitions it is comparing have the same type.
+ */
+static int partition_prioritize(Partition **p, const char *node, int index, uint64_t flags) {
+
+        _cleanup_partition_free_ Partition *t = NULL;
+
+        assert(!(flags & GPT_FLAG_NO_AUTO));
+
+        t = partition_new(node, index, flags);
+        if (!t)
+                return log_oom();
+
+        if (t->priority && !(t->tries || t->successful))
+                return 0;
+
+        if (*p && (*p)->priority > t->priority)
+                return 0;
+
+        if (*p && (*p)->priority == t->priority && (*p)->index <= t->index)
+                return 0;
+
+        partition_free(*p);
+        *p = t;
+        t = NULL;
+        return 0;
+}
+
+static int partition_decrement_tries(Partition *p, const char *disk_device) {
+
+#ifdef HAVE_LIBFDISK
+        _cleanup_fdisk_unref_context_ struct fdisk_context *cxt = NULL;
+        const uint64_t mask = GPT_FLAG_TRIES_MAX << GPT_FLAG_TRIES_OFFSET;
+        uint64_t attrs;
+        int r = 0;
+#endif
+
+        if (!p || !disk_device)
+                return 0;
+
+        assert(p->tries <= GPT_FLAG_TRIES_MAX);
+
+        if (arg_read_only)
+                return 0;
+
+        if (!p->priority || !p->tries)
+                return 0;
+
+#ifdef HAVE_LIBFDISK
+        fdisk_init_debug(0);
+        cxt = fdisk_new_context();
+        if (!cxt)
+                return log_oom();
+
+        r = fdisk_assign_device(cxt, disk_device, 0);
+        if (r < 0) {
+                return r;
+        }
+
+        /* Currently GPT is always the first label in cxt so this loop
+         * is just here in case that ever happens to change.  */
+        while (!fdisk_is_label(cxt, GPT)) {
+                struct fdisk_label *lb = NULL;
+                r = fdisk_next_label(cxt, &lb);
+                if (r < 0)
+                        return r;
+                if (r > 0)
+                        return -EINVAL;
+        }
+
+        /* Of course libblkid starts at 1, libfdisk starts at 0. */
+        r = fdisk_gpt_get_partition_attrs(cxt, p->index-1, &attrs);
+        if (r < 0)
+                return r;
+
+        p->tries--;
+        attrs = (attrs & ~mask) |
+                (((uint64_t)p->tries) << GPT_FLAG_TRIES_OFFSET);
+
+        r = fdisk_gpt_set_partition_attrs(cxt, p->index-1, attrs);
+        if (r < 0)
+                return r;
+
+        log_debug("Setting tries for partition %d on %s to %u.",
+                        p->index, disk_device, p->tries);
+        r = fdisk_write_disklabel(cxt);
+        if (r < 0)
+                return r;
+
+        /* Using deassign_device before unref_context ensures that both
+         * fsync() and close() are called successfully. */
+        r = fdisk_deassign_device(cxt, 0);
+        if (r < 0)
+                return r;
+
+        return 0;
+#else
+        log_error("GPT 'tries' attribute not supported, compiled without fdisk support.");
+        return -EOPNOTSUPP;
+#endif
+}
+
 #define PARTITION_TABLE_BLURB \
         "Note that the disk image needs to either contain only a single MBR partition of\n" \
         "type 0x83 that is marked bootable, or a single GPT partition of type " \
@@ -2776,26 +2987,31 @@ static int setup_image(char **device_path, int *loop_nr) {
 
 static int dissect_image(
                 int fd,
-                char **root_device, bool *root_device_rw,
-                char **home_device, bool *home_device_rw,
-                char **srv_device, bool *srv_device_rw,
+                Partition **root_device,
+                Partition **usr_device,
+                Partition **home_device,
+                Partition **srv_device,
                 bool *secondary) {
 
 #ifdef HAVE_BLKID
-        int home_nr = -1, srv_nr = -1;
+        _cleanup_partition_free_ Partition *generic = NULL, *home = NULL, *srv = NULL;
 #ifdef GPT_ROOT_NATIVE
-        int root_nr = -1;
+        _cleanup_partition_free_ Partition *root = NULL;
 #endif
 #ifdef GPT_ROOT_SECONDARY
-        int secondary_root_nr = -1;
+        _cleanup_partition_free_ Partition *secondary_root = NULL;
 #endif
-        _cleanup_free_ char *home = NULL, *root = NULL, *secondary_root = NULL, *srv = NULL, *generic = NULL;
+#ifdef GPT_USR_NATIVE
+        _cleanup_partition_free_ Partition *usr = NULL;
+#endif
+#ifdef GPT_USR_SECONDARY
+        _cleanup_partition_free_ Partition *secondary_usr = NULL;
+#endif
         _cleanup_udev_enumerate_unref_ struct udev_enumerate *e = NULL;
         _cleanup_udev_device_unref_ struct udev_device *d = NULL;
         _cleanup_blkid_free_probe_ blkid_probe b = NULL;
         _cleanup_udev_unref_ struct udev *udev = NULL;
         struct udev_list_entry *first, *item;
-        bool home_rw = true, root_rw = true, secondary_root_rw = true, srv_rw = true, generic_rw = true;
         bool is_gpt, is_mbr, multiple_generic = false;
         const char *pttype = NULL;
         blkid_partlist pl;
@@ -2805,6 +3021,7 @@ static int dissect_image(
 
         assert(fd >= 0);
         assert(root_device);
+        assert(usr_device);
         assert(home_device);
         assert(srv_device);
         assert(secondary);
@@ -2950,7 +3167,7 @@ static int dissect_image(
         udev_list_entry_foreach(item, first) {
                 _cleanup_udev_device_unref_ struct udev_device *q;
                 const char *node;
-                unsigned long long flags;
+                uint64_t flags;
                 blkid_partition pp;
                 dev_t qn;
                 int nr;
@@ -3002,54 +3219,54 @@ static int dissect_image(
 
                         if (sd_id128_equal(type_id, GPT_HOME)) {
 
-                                if (home && nr >= home_nr)
+                                if (home && nr >= home->index)
                                         continue;
 
-                                home_nr = nr;
-                                home_rw = !(flags & GPT_FLAG_READ_ONLY);
-
-                                r = free_and_strdup(&home, node);
-                                if (r < 0)
+                                partition_free(home);
+                                home = partition_new(node, nr, flags);
+                                if (!home)
                                         return log_oom();
 
                         } else if (sd_id128_equal(type_id, GPT_SRV)) {
 
-                                if (srv && nr >= srv_nr)
+                                if (srv && nr >= srv->index)
                                         continue;
 
-                                srv_nr = nr;
-                                srv_rw = !(flags & GPT_FLAG_READ_ONLY);
-
-                                r = free_and_strdup(&srv, node);
-                                if (r < 0)
+                                partition_free(srv);
+                                srv = partition_new(node, nr, flags);
+                                if (!srv)
                                         return log_oom();
                         }
 #ifdef GPT_ROOT_NATIVE
                         else if (sd_id128_equal(type_id, GPT_ROOT_NATIVE)) {
 
-                                if (root && nr >= root_nr)
-                                        continue;
-
-                                root_nr = nr;
-                                root_rw = !(flags & GPT_FLAG_READ_ONLY);
-
-                                r = free_and_strdup(&root, node);
+                                r = partition_prioritize(&root, node, nr, flags);
                                 if (r < 0)
-                                        return log_oom();
+                                        return r;
                         }
 #endif
 #ifdef GPT_ROOT_SECONDARY
                         else if (sd_id128_equal(type_id, GPT_ROOT_SECONDARY)) {
 
-                                if (secondary_root && nr >= secondary_root_nr)
-                                        continue;
-
-                                secondary_root_nr = nr;
-                                secondary_root_rw = !(flags & GPT_FLAG_READ_ONLY);
-
-                                r = free_and_strdup(&secondary_root, node);
+                                r = partition_prioritize(&secondary_root, node, nr, flags);
                                 if (r < 0)
-                                        return log_oom();
+                                        return r;
+                        }
+#endif
+#ifdef GPT_USR_NATIVE
+                        else if (sd_id128_equal(type_id, GPT_USR_NATIVE)) {
+
+                                r = partition_prioritize(&usr, node, nr, flags);
+                                if (r < 0)
+                                        return r;
+                        }
+#endif
+#ifdef GPT_USR_SECONDARY
+                        else if (sd_id128_equal(type_id, GPT_USR_SECONDARY)) {
+
+                                r = partition_prioritize(&secondary_usr, node, nr, flags);
+                                if (r < 0)
+                                        return r;
                         }
 #endif
                         else if (sd_id128_equal(type_id, GPT_LINUX_GENERIC)) {
@@ -3057,10 +3274,8 @@ static int dissect_image(
                                 if (generic)
                                         multiple_generic = true;
                                 else {
-                                        generic_rw = !(flags & GPT_FLAG_READ_ONLY);
-
-                                        r = free_and_strdup(&generic, node);
-                                        if (r < 0)
+                                        generic = partition_new(node, nr, flags);
+                                        if (!generic)
                                                 return log_oom();
                                 }
                         }
@@ -3078,10 +3293,8 @@ static int dissect_image(
                         if (generic)
                                 multiple_generic = true;
                         else {
-                                generic_rw = true;
-
-                                r = free_and_strdup(&root, node);
-                                if (r < 0)
+                                generic = partition_new(node, nr, 0);
+                                if (!generic)
                                         return log_oom();
                         }
                 }
@@ -3091,13 +3304,11 @@ static int dissect_image(
                 *root_device = root;
                 root = NULL;
 
-                *root_device_rw = root_rw;
                 *secondary = false;
         } else if (secondary_root) {
                 *root_device = secondary_root;
                 secondary_root = NULL;
 
-                *root_device_rw = secondary_root_rw;
                 *secondary = true;
         } else if (generic) {
 
@@ -3117,7 +3328,6 @@ static int dissect_image(
                 *root_device = generic;
                 generic = NULL;
 
-                *root_device_rw = generic_rw;
                 *secondary = false;
         } else {
                 log_error("Failed to identify root partition in disk image\n"
@@ -3126,18 +3336,22 @@ static int dissect_image(
                 return -EINVAL;
         }
 
+        if (usr && !*secondary) {
+                *usr_device = usr;
+                usr = NULL;
+        } else if (secondary_usr && *secondary) {
+                *usr_device = secondary_usr;
+                secondary_usr = NULL;
+        }
+
         if (home) {
                 *home_device = home;
                 home = NULL;
-
-                *home_device_rw = home_rw;
         }
 
         if (srv) {
                 *srv_device = srv;
                 srv = NULL;
-
-                *srv_device_rw = srv_rw;
         }
 
         return 0;
@@ -3147,17 +3361,18 @@ static int dissect_image(
 #endif
 }
 
-static int mount_device(const char *what, const char *where, const char *directory, bool rw) {
+static int mount_device(const Partition *what, const char *where, const char *directory) {
 #ifdef HAVE_BLKID
         _cleanup_blkid_free_probe_ blkid_probe b = NULL;
         const char *fstype, *p;
+        bool ro;
         int r;
 
         assert(what);
+        assert(what->node);
         assert(where);
 
-        if (arg_read_only)
-                rw = false;
+        ro = arg_read_only || what->read_only;
 
         if (directory)
                 p = strjoina(where, directory);
@@ -3165,11 +3380,11 @@ static int mount_device(const char *what, const char *where, const char *directo
                 p = where;
 
         errno = 0;
-        b = blkid_new_probe_from_filename(what);
+        b = blkid_new_probe_from_filename(what->node);
         if (!b) {
                 if (errno == 0)
                         return log_oom();
-                log_error_errno(errno, "Failed to allocate prober for %s: %m", what);
+                log_error_errno(errno, "Failed to allocate prober for %s: %m", what->node);
                 return -errno;
         }
 
@@ -3179,12 +3394,12 @@ static int mount_device(const char *what, const char *where, const char *directo
         errno = 0;
         r = blkid_do_safeprobe(b);
         if (r == -1 || r == 1) {
-                log_error("Cannot determine file system type of %s", what);
+                log_error("Cannot determine file system type of %s", what->node);
                 return -EINVAL;
         } else if (r != 0) {
                 if (errno == 0)
                         errno = EIO;
-                log_error_errno(errno, "Failed to probe %s: %m", what);
+                log_error_errno(errno, "Failed to probe %s: %m", what->node);
                 return -errno;
         }
 
@@ -3192,7 +3407,7 @@ static int mount_device(const char *what, const char *where, const char *directo
         if (blkid_probe_lookup_value(b, "TYPE", &fstype, NULL) < 0) {
                 if (errno == 0)
                         errno = EINVAL;
-                log_error("Failed to determine file system type of %s", what);
+                log_error("Failed to determine file system type of %s", what->node);
                 return -errno;
         }
 
@@ -3201,8 +3416,8 @@ static int mount_device(const char *what, const char *where, const char *directo
                 return -EOPNOTSUPP;
         }
 
-        if (mount(what, p, fstype, MS_NODEV|(rw ? 0 : MS_RDONLY), NULL) < 0)
-                return log_error_errno(errno, "Failed to mount %s: %m", what);
+        if (mount(what->node, p, fstype, MS_NODEV|(ro ? MS_RDONLY : 0), NULL) < 0)
+                return log_error_errno(errno, "Failed to mount %s: %m", what->node);
 
         return 0;
 #else
@@ -3213,27 +3428,36 @@ static int mount_device(const char *what, const char *where, const char *directo
 
 static int mount_devices(
                 const char *where,
-                const char *root_device, bool root_device_rw,
-                const char *home_device, bool home_device_rw,
-                const char *srv_device, bool srv_device_rw) {
+                const Partition *root_device,
+                const Partition *usr_device,
+                const Partition *home_device,
+                const Partition *srv_device) {
         int r;
 
         assert(where);
 
         if (root_device) {
-                r = mount_device(root_device, arg_directory, NULL, root_device_rw);
+                r = mount_device(root_device, arg_directory, NULL);
                 if (r < 0)
                         return log_error_errno(r, "Failed to mount root directory: %m");
         }
 
+        if (usr_device) {
+                r = mount_device(usr_device, arg_directory, "/usr");
+                if (r < 0) {
+                        log_error("Failed to mount usr directory: %s", strerror(-r));
+                        return r;
+                }
+        }
+
         if (home_device) {
-                r = mount_device(home_device, arg_directory, "/home", home_device_rw);
+                r = mount_device(home_device, arg_directory, "/home");
                 if (r < 0)
                         return log_error_errno(r, "Failed to mount home directory: %m");
         }
 
         if (srv_device) {
-                r = mount_device(srv_device, arg_directory, "/srv", srv_device_rw);
+                r = mount_device(srv_device, arg_directory, "/srv");
                 if (r < 0)
                         return log_error_errno(r, "Failed to mount server data directory: %m");
         }
@@ -3695,8 +3919,9 @@ static int determine_uid_shift(void) {
 
 int main(int argc, char *argv[]) {
 
-        _cleanup_free_ char *device_path = NULL, *root_device = NULL, *home_device = NULL, *srv_device = NULL, *console = NULL;
-        bool root_device_rw = true, home_device_rw = true, srv_device_rw = true;
+        _cleanup_free_ char *device_path = NULL, *console = NULL;
+        _cleanup_partition_free_ Partition *root_device = NULL, *usr_device = NULL,
+                                 *home_device = NULL, *srv_device = NULL;
         _cleanup_close_ int master = -1, image_fd = -1;
         _cleanup_fdset_free_ FDSet *fds = NULL;
         int r, n_fd_passed, loop_nr = -1;
@@ -3867,9 +4092,10 @@ int main(int argc, char *argv[]) {
                 }
 
                 r = dissect_image(image_fd,
-                                  &root_device, &root_device_rw,
-                                  &home_device, &home_device_rw,
-                                  &srv_device, &srv_device_rw,
+                                  &root_device,
+                                  &usr_device,
+                                  &home_device,
+                                  &srv_device,
                                   &secondary);
                 if (r < 0)
                         goto finish;
@@ -4040,10 +4266,25 @@ int main(int argc, char *argv[]) {
                                 _exit(EXIT_FAILURE);
                         }
 
+                        /* Prior to mounting mark any priority based partitions
+                         * as tried so subsequent boots recognize failures. */
+                        r = partition_decrement_tries(root_device, device_path);
+                        if (r < 0) {
+                                log_error_errno(errno, "Updating root 'tries' attribute failed: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+
+                        r = partition_decrement_tries(usr_device, device_path);
+                        if (r < 0) {
+                                log_error_errno(errno, "Updating usr 'tries' attribute failed: %m");
+                                _exit(EXIT_FAILURE);
+                        }
+
                         if (mount_devices(arg_directory,
-                                          root_device, root_device_rw,
-                                          home_device, home_device_rw,
-                                          srv_device, srv_device_rw) < 0)
+                                          root_device,
+                                          usr_device,
+                                          home_device,
+                                          srv_device) < 0)
                                 _exit(EXIT_FAILURE);
 
                         /* Turn directory into bind mount */
@@ -4074,7 +4315,12 @@ int main(int argc, char *argv[]) {
                         if (mount_all(arg_directory) < 0)
                                 _exit(EXIT_FAILURE);
 
-                        if (copy_devnodes(arg_directory) < 0)
+                        if (copy_devnodes(arg_directory,
+                                          device_path,
+                                          root_device,
+                                          usr_device,
+                                          home_device,
+                                          srv_device) < 0)
                                 _exit(EXIT_FAILURE);
 
                         if (setup_ptmx(arg_directory) < 0)

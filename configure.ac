@@ -450,6 +450,18 @@ fi
 AM_CONDITIONAL(HAVE_BLKID, [test "$have_blkid" = "yes"])
 
 # ------------------------------------------------------------------------------
+have_libfdisk=no
+AC_ARG_ENABLE(libfdisk, AS_HELP_STRING([--disable-libfdisk], [disable libfdisk support]))
+if test "x$enable_libfdisk" != "xno"; then
+        PKG_CHECK_MODULES(LIBFDISK, [ fdisk >= 2.27 ],
+                [AC_DEFINE(HAVE_LIBFDISK, 1, [Define if libfdisk is available]) have_libfdisk=yes], have_libfdisk=no)
+        if test "x$have_libfdisk" = xno -a "x$enable_libfdisk" = xyes; then
+                AC_MSG_ERROR([*** libfdisk support requested but libraries not found])
+        fi
+fi
+AM_CONDITIONAL(HAVE_LIBFDISK, [test "$have_libfdisk" = "yes"])
+
+# ------------------------------------------------------------------------------
 have_libmount=no
 PKG_CHECK_MODULES(MOUNT, [ mount >= 2.20 ],
         [AC_DEFINE(HAVE_LIBMOUNT, 1, [Define if libmount is available]) have_libmount=yes], have_libmount=no)
@@ -1579,6 +1591,7 @@ AC_MSG_RESULT([
         kmod:                    ${have_kmod}
         xkbcommon:               ${have_xkbcommon}
         blkid:                   ${have_blkid}
+        libfdisk:                ${have_libfdisk}
         libmount:                ${have_libmount}
         dbus:                    ${have_dbus}
         nss-myhostname:          ${have_myhostname}

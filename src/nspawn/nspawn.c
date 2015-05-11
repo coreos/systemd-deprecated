@@ -1485,7 +1485,13 @@ static int copy_devnode(const char *dest, const char *from) {
         return 0;
 }
 
-static int copy_devnodes(const char *dest) {
+static int copy_devnodes(
+                const char *dest,
+                const char *disk_device,
+                const Partition *root_device,
+                const Partition *usr_device,
+                const Partition *home_device,
+                const Partition *srv_device) {
 
         static const char devnodes[] =
                 "/dev/null\0"
@@ -1501,6 +1507,36 @@ static int copy_devnodes(const char *dest) {
 
         NULSTR_FOREACH(d, devnodes) {
                 r = copy_devnode(dest, d);
+                if (r < 0)
+                        return r;
+        }
+
+        if (disk_device) {
+                r = copy_devnode(dest, disk_device);
+                if (r < 0)
+                        return r;
+        }
+
+        if (root_device) {
+                r = copy_devnode(dest, root_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (usr_device) {
+                r = copy_devnode(dest, usr_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (home_device) {
+                r = copy_devnode(dest, home_device->node);
+                if (r < 0)
+                        return r;
+        }
+
+        if (srv_device) {
+                r = copy_devnode(dest, srv_device->node);
                 if (r < 0)
                         return r;
         }
@@ -4279,7 +4315,12 @@ int main(int argc, char *argv[]) {
                         if (mount_all(arg_directory) < 0)
                                 _exit(EXIT_FAILURE);
 
-                        if (copy_devnodes(arg_directory) < 0)
+                        if (copy_devnodes(arg_directory,
+                                          device_path,
+                                          root_device,
+                                          usr_device,
+                                          home_device,
+                                          srv_device) < 0)
                                 _exit(EXIT_FAILURE);
 
                         if (setup_ptmx(arg_directory) < 0)

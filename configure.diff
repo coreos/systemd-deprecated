@@ -1,0 +1,47 @@
+1184,1202c1184,1204
+<         have_efi_lds=no
+<         AC_ARG_WITH(efi-ldsdir,
+<                 AS_HELP_STRING([--with-efi-ldsdir=PATH], [Path to EFI lds directory]),
+<                 [EFI_LDS_DIR="$withval" && AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+<                         [have_efi_lds=yes])],
+<                 [AS_FOR([DIR], [EFI_LDS_DIR], ["${efiroot}/gnuefi" "${efiroot}"],
+<                         [AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+<                                        [have_efi_lds=yes && break])])])
+<         AS_IF([test "x$have_efi_lds" = xyes],
+<               [AC_SUBST([EFI_LDS_DIR])],
+<               [AS_IF([test "x$enable_gnuefi" = xyes],
+<                      [AC_MSG_ERROR([*** gnuefi support requested but files not found])],
+<                      [have_gnuefi=no])])
+< 
+<         AC_ARG_WITH(efi-includedir,
+<                 AS_HELP_STRING([--with-efi-includedir=PATH], [Path to EFI include directory]),
+<                 [EFI_INC_DIR="$withval"], [EFI_INC_DIR="/usr/include"]
+<         )
+<         AC_SUBST([EFI_INC_DIR])
+---
+> 	have_efi_lds=yes
+> 
+>  #       have_efi_lds=no
+>  #       AC_ARG_WITH(efi-ldsdir,
+>  #               AS_HELP_STRING([--with-efi-ldsdir=PATH], [Path to EFI lds directory]),
+>  #               [EFI_LDS_DIR="$withval" && AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+>  #                       [have_efi_lds=yes])],
+>  #               [AS_FOR([DIR], [EFI_LDS_DIR], ["${efiroot}/gnuefi" "${efiroot}"],
+>  #                        [AC_CHECK_FILE([${EFI_LDS_DIR}/elf_${EFI_ARCH}_efi.lds],
+>  #                                       [have_efi_lds=yes && break])])])
+>  #       AS_IF([test "x$have_efi_lds" = xyes],
+>  #             [AC_SUBST([EFI_LDS_DIR])],
+>  #             [AS_IF([test "x$enable_gnuefi" = xyes],
+>  #                    [AC_MSG_ERROR([*** gnuefi support requested but files not found])],
+>  #                    [have_gnuefi=no])])
+>  #
+>  #        AC_ARG_WITH(efi-includedir,
+>  #                AS_HELP_STRING([--with-efi-includedir=PATH], [Path to EFI include directory]),
+>  #               [EFI_INC_DIR="$withval"], [EFI_INC_DIR="/usr/include"]
+>  #       )
+>  #       AC_SUBST([EFI_INC_DIR])
+1298c1300
+<         AC_FUNC_MALLOC
+---
+> #        AC_FUNC_MALLOC
+
